@@ -14,4 +14,4 @@ The fixture PDFs are generated from original test instructions using a standard 
 
 The ASCII Helvetica/Helvetica-Bold advance tables in `engine/src/text_edit.cpp` contain standard numeric PDF font metrics, checked against the installed ReportLab `pdfmetrics` data. Courier uses its standard fixed 600-unit advance. No font program or ReportLab implementation code is bundled. Metric-compatible primary reference: [Artifex Nimbus Sans AFM](https://github.com/ArtifexSoftware/urw-base35-fonts/blob/master/fonts/NimbusSans-Regular.afm).
 
-Before public distribution, select a project license and complete an inventory of the exact deployed modules, third-party sources, notices, source-offer/relinking requirements, fonts, and packaging assets. Available notices and top-level dependency labels alone do not establish release compliance.
+The project's license is Apache-2.0 (see LICENSE). Before public distribution, complete an inventory of the exact deployed modules, third-party sources, notices, source-offer/relinking requirements, fonts, and packaging assets. Available notices and top-level dependency labels alone do not establish release compliance.

@@ -35,6 +35,14 @@ ctest --test-dir build/custom --output-on-failure
 
 Use `-DFOLIOFORGE_DESKTOP=OFF` to build the engine, CLI, and engine tests without Qt. Only Windows x64 / MSVC has been built and tested so far. Runtime discovery on other platforms is the caller's responsibility.
 
+## Build installers and portable packages
+
+Use [scripts/release.ps1](scripts/release.ps1) or [scripts/release.sh](scripts/release.sh)
+to build, test, and package on Windows, Linux, or macOS. Supported outputs are
+Windows ZIP/MSI/EXE, Linux TGZ/DEB/RPM, and macOS APP bundles in DMG/PKG/ZIP/TGZ.
+See [packaging instructions](docs/packaging.md) for dependencies, examples and
+platform validation limits. Outputs go to `dist/<OS>` with SHA-256 checksums.
+
 ## Implemented workflows
 
 | Feature | Current behavior |
@@ -83,10 +91,10 @@ See [implementation status](docs/implementation-status.md), [ownership ADR](docs
 
 ## Limits of this preview
 
-Arbitrary text/paragraph editing, new text/images/shapes, annotations, forms, signing, redaction, OCR, printing, outline navigation, page-range extraction/splitting, recovery, a thumbnail organization grid, cancellable jobs, and installers are not implemented. Rendering uses one page at a time; thumbnails are populated when pages are visited. Search lists matching pages and does not highlight glyphs on the canvas.
+Arbitrary text/paragraph editing, new text/images/shapes, annotations, forms, signing, redaction, OCR, printing, outline navigation, page-range extraction/splitting, recovery, a thumbnail organization grid, and cancellable jobs are not implemented. Rendering uses one page at a time; thumbnails are populated when pages are visited. Search lists matching pages and does not highlight glyphs on the canvas.
 
 The parser and renderer currently run in-process. The supplied PDFium binary has V8/XFA compiled in; hardened builds and isolated workers remain release prerequisites. Input/snapshots are limited to 256 MiB, documents to 10,000 pages, and rasters to 32 megapixels. These bounds do not provide full protection against malicious decoded streams or expensive PDFs. Large-file and cross-platform qualification is outstanding.
 
 Save conflict checking compares complete source bytes immediately before replacement. There is no cross-application locking protocol, so an external writer can still race the final comparison/replacement. Existing signature preservation is not claimed. Direct engine callers should run `Renderer::validate(snapshot)` before `Document::save`, as the desktop and CLI do.
 
-No project distribution license has been selected; the plan's GPL/MPL suggestions were proposals. This is a local development build, not a redistributable release. See [third-party notices](THIRD_PARTY_NOTICES.md) before packaging or publishing.
+The project includes an Apache-2.0 [LICENSE](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md) for the external dependencies included in a distribution.

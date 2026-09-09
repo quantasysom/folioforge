@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=FolioForge
+Comment=Read and edit PDF documents
+Exec=pdfeditor-desktop %F
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/pdf;
