@@ -1,0 +1,21 @@
+{
+  "captured": "2026-09-08",
+  "platform": "Windows x64",
+  "toolchain": "MSVC 19.51.36246.0 / Visual Studio 2026",
+  "status": "Observed local artifacts, not a reproducible source dependency lock",
+  "qt": {
+    "version": "6.11.1", "root": "C:/Qt/6.11.1/msvc2022_64",
+    "Qt6Core.dll_sha256": "FAE4778A42E93ADC82B831C879C886A05147E9CC26760808D21116BE5547259B"
+  },
+  "qpdf": {
+    "version": "12.3.2", "root": "C:/projects/vPDF/vcpkg_installed/x64-windows",
+    "qpdf30.dll_sha256": "72A45CFBF81E79B62E6E03E7A1D7DE6AB820FB0D7A9D5AA9B7AAE548A860EAE6"
+  },
+  "pdfium": {
+    "version": "150.0.7869.0", "root": "C:/projects/vPDF/third_party/pdfium",
+    "pdfium.dll_sha256": "41238105B99A9649632BCCEF30C2DCEFB00BACB7D0EE9ED85D8850417F26F0F1",
+    "observed_flags": {"pdf_enable_v8": true, "pdf_enable_xfa": true, "pdf_is_standalone": true, "is_debug": false, "pdf_use_partition_alloc": false},
+    "source_commit": null,
+    "release_requirement": "Pin source commit and matching headers; rebuild with scripting/XFA disabled; qualify isolated worker behavior."
+  }
+}

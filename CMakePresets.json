@@ -1,0 +1,16 @@
+{
+  "version": 6,
+  "configurePresets": [{
+    "name": "dev", "displayName": "Local Windows / MSVC dependencies",
+    "generator": "Ninja", "binaryDir": "${sourceDir}/build/gui",
+    "cacheVariables": {
+      "CMAKE_BUILD_TYPE": "Release",
+      "CMAKE_MAKE_PROGRAM": "C:/Qt/Tools/Ninja/ninja.exe",
+      "CMAKE_PREFIX_PATH": "C:/Qt/6.11.1/msvc2022_64;C:/projects/vPDF/vcpkg_installed/x64-windows",
+      "PDFIUM_ROOT": "C:/projects/vPDF/third_party/pdfium"
+    }
+  }],
+  "buildPresets": [{"name": "dev", "configurePreset": "dev"}],
+  "testPresets": [{"name": "dev", "configurePreset": "dev", "output": {"outputOnFailure": true},
+    "environment": {"PATH": "C:/Qt/6.11.1/msvc2022_64/bin;C:/projects/vPDF/vcpkg_installed/x64-windows/bin;C:/projects/vPDF/third_party/pdfium/bin;$penv{PATH}"}}]
+}

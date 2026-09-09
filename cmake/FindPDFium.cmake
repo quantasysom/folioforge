@@ -1,0 +1,10 @@
+set(PDFIUM_ROOT "" CACHE PATH "PDFium distribution with include, lib, and bin directories")
+find_path(PDFIUM_INCLUDE_DIR fpdfview.h HINTS "${PDFIUM_ROOT}" PATH_SUFFIXES include public)
+find_library(PDFIUM_LIBRARY NAMES pdfium pdfium.dll HINTS "${PDFIUM_ROOT}" PATH_SUFFIXES lib)
+include(FindPackageHandleStandardArgs)
+find_package_handle_standard_args(PDFium REQUIRED_VARS PDFIUM_INCLUDE_DIR PDFIUM_LIBRARY)
+if(PDFium_FOUND AND NOT TARGET PDFium::PDFium)
+  add_library(PDFium::PDFium UNKNOWN IMPORTED)
+  set_target_properties(PDFium::PDFium PROPERTIES IMPORTED_LOCATION "${PDFIUM_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${PDFIUM_INCLUDE_DIR}")
+endif()
