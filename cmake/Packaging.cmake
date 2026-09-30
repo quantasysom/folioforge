@@ -23,15 +23,15 @@ else()
 endif()
 if(UNIX AND NOT APPLE)
   # Runtime libraries deployed next to the application must be relocatable.
-  set_target_properties(pdfeditor-desktop pdfeditor-cli PROPERTIES
+  set_target_properties(pdfeditor-desktop pdfeditor-cli pdfeditor-render PROPERTIES
     INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
 endif()
 install(TARGETS pdfeditor-desktop BUNDLE DESTINATION . RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(TARGETS pdfeditor-cli RUNTIME DESTINATION "${cli_destination}")
+install(TARGETS pdfeditor-cli pdfeditor-render RUNTIME DESTINATION "${cli_destination}")
 qt_generate_deploy_script(TARGET pdfeditor-desktop OUTPUT_SCRIPT qt_deploy CONTENT "
 qt_deploy_runtime_dependencies(
   EXECUTABLE \"${deploy_executable}\"
-  ADDITIONAL_EXECUTABLES \"${cli_destination}/$<TARGET_FILE_NAME:pdfeditor-cli>\"
+  ADDITIONAL_EXECUTABLES \"${cli_destination}/$<TARGET_FILE_NAME:pdfeditor-cli>\" \"${cli_destination}/$<TARGET_FILE_NAME:pdfeditor-render>\"
   GENERATE_QT_CONF NO_TRANSLATIONS)
 ")
 install(SCRIPT "${qt_deploy}")

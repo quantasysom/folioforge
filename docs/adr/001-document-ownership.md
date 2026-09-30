@@ -8,6 +8,6 @@ Page IDs are monotonically allocated within a session. Duplicates/imports get ne
 
 This favors correctness and clear ownership over large-file performance. Small generated-document workflows pass on the installed stack. No broad source-mapped text editing, multilingual font writing, large-file latency target, or full P0 exit criterion has been qualified.
 
-The plan calls for a separate rendering process. This preview implements serialized background work and a process-wide PDFium lock first. Process isolation, cancellation/timeouts, IPC, and restricted-worker permissions are still required before release hardening. A thread is not a sandbox.
+Rendering now runs in an isolated worker process; see [ADR-002](002-render-worker.md). Undo history keeps recent snapshots in memory and spills older ones to temporary files (`HistoryLimits`: 256 MiB memory, 4 GiB disk, 200 entries by default); snapshots are capped at 1 GiB.
 
 The QPDF dependency boundary follows its [document/page helper model](https://qpdf.readthedocs.io/en/stable/design.html). Exact implementation calls were checked against the locally installed 12.3.2 headers. PDFium APIs and ownership rules were checked against the installed public headers.

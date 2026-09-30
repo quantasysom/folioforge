@@ -36,7 +36,7 @@ void outsideEqual(const Bitmap& before, const Bitmap& after, const TextRun& run)
     require(before.width == after.width && before.height == after.height, "Text edit changed page geometry");
     bool different = false;
     for (int y = 0; y < before.height; ++y) for (int x = 0; x < before.width; ++x) {
-        bool inside = x >= std::floor(run.x - 4) && x <= std::ceil(run.x + run.width + 4) &&
+        bool inside = x >= std::floor(run.x - 4) && x <= before.width - 1 &&
             y >= std::floor(before.height - run.baseline - run.fontSize - 4) && y <= std::ceil(before.height - run.baseline + run.fontSize*0.3 + 4);
         for (int channel = 0; channel < 4; ++channel) {
             auto offset = static_cast<std::size_t>(y) * before.stride + x*4 + channel;
@@ -77,12 +77,16 @@ int main() {
         doc->redo(doc->info().revision); require(!doc->info().dirty, "Redo to saved edited state should be clean");
         rejected([&] { doc->replaceText({page, run.id, run.revision, "OLD"}); }, ErrorCode::StaleRevision);
         auto current = doc->textRuns(page).runs.front(); auto checkpoint = doc->snapshot();
-        rejected([&] { doc->replaceText({page, current.id, current.revision, "Replacement that does not fit"}); }, ErrorCode::TextOverflow);
+        rejected([&] { doc->replaceText({page, current.id, current.revision, std::string(120, 'W')}); }, ErrorCode::TextOverflow);
         rejected([&] { doc->replaceText({page, current.id, current.revision, "\xE0\xB0\x85"}); }, ErrorCode::Unsupported);
         require(doc->snapshot().bytes == checkpoint.bytes && doc->info().revision == checkpoint.revision, "Rejected text edit changed committed state");
-        // Short edits retain the original advance, allowing later growth within that slot.
-        doc->replaceText({page, current.id, current.revision, "ORIGINAL"});
-        require(Renderer::render(doc->snapshot(), 0, 1).bgra == before.bgra, "Re-edit did not retain original text slot");
+        // Text may grow past the original slot; following text in the same text object reflows.
+        doc->replaceText({page, current.id, current.revision, "A much longer replacement"});
+        require(Renderer::text(doc->snapshot(), 0).find(u"A much longer replacement") != std::u16string::npos, "Longer replacement failed");
+        auto grown = doc->textRuns(page).runs;
+        require(grown.size() == 3 && grown[1].x > current.x + current.width + 20, "Following run did not reflow after growth");
+        doc->replaceText({page, grown[0].id, grown[0].revision, "ORIGINAL"});
+        require(Renderer::render(doc->snapshot(), 0, 1).bgra == before.bgra, "Restoring the text did not restore the page");
         current = doc->textRuns(page).runs.front();
         doc->replaceText({page, current.id, current.revision, ""});
         require(Renderer::text(doc->snapshot(), 0).find(u"ORIGINAL") == std::u16string::npos, "Empty replacement failed to remove text");
@@ -120,7 +124,7 @@ int main() {
         auto multiple = open(commands, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>", true);
         require(multiple->textRuns(multiple->info().pages[0].id).runs.empty(), "Multiple streams accepted without source qualification");
         require(Renderer::render(original, 0, 1).bgra == before.bgra, "Prior snapshot lifetime broken");
-        std::cout << checks << " text-edit checks passed: source mapping, escaped tokens, slot preservation, shared resources, round trips, raster invariants, undo, and rejection paths\n";
+        std::cout << checks << " text-edit checks passed: source mapping, escaped tokens, text growth and reflow, shared resources, round trips, raster invariants, undo, and rejection paths\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
 }

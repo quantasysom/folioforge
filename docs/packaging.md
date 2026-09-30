@@ -26,9 +26,10 @@ as applicable. PDFium's shared library must be in `bin` on Windows or `lib` on U
 | macOS | DMG (default), PKG, ZIP, TGZ | Xcode command-line tools, Qt's `macdeployqt`; native `hdiutil` / `productbuild` |
 
 `EXE` means an NSIS installer. Windows application `.exe` files are built for
-every Windows format. macOS packages contain `FolioForge.app`, with the CLI at
-`FolioForge.app/Contents/MacOS/pdfeditor-cli`. Windows/Linux packages contain
-both executables in `bin`.
+every Windows format. macOS packages contain `FolioForge.app`, with the CLI and the
+`pdfeditor-render` rendering worker beside the app binary in
+`FolioForge.app/Contents/MacOS`. Windows/Linux packages contain all executables
+in `bin`. The worker must stay next to the application.
 
 WiX 4 needs CMake 3.30+ and its matching `WixToolset.UI.wixext` extension installed.
 For example, install WiX 4.0.4 and `WixToolset.UI.wixext/4.0.4` together; select
@@ -40,15 +41,15 @@ run before compilation; formats are never silently skipped.
 ```powershell
 ./scripts/release.ps1 `
   -QtRoot C:/Qt/6.11.1/msvc2022_64 `
-  -QpdfRoot C:/projects/vPDF/vcpkg_installed/x64-windows `
-  -PdfiumRoot C:/projects/vPDF/third_party/pdfium `
+  -QpdfRoot C:/deps/qpdf `
+  -PdfiumRoot C:/deps/pdfium `
   -Formats ZIP
 
 # With WiX 4 and NSIS installed and available on PATH:
 ./scripts/release.ps1 `
   -QtRoot C:/Qt/6.11.1/msvc2022_64 `
-  -QpdfRoot C:/projects/vPDF/vcpkg_installed/x64-windows `
-  -PdfiumRoot C:/projects/vPDF/third_party/pdfium `
+  -QpdfRoot C:/deps/qpdf `
+  -PdfiumRoot C:/deps/pdfium `
   -Formats ZIP,MSI,EXE -WixVersion 4
 ```
 

@@ -16,7 +16,7 @@ The supplied plan is a multi-phase product specification. The initial workspace 
 | P-01 / P-02 | Blank/insert/delete/rotate/duplicate/reorder with history | Multi-selection and drag interactions, broader geometry fixtures |
 | P-03 | Whole-document page insertion for basic supported PDFs | Page ranges and supported structured-document relationship remapping |
 | O-01 | PNG current-page export and document text export | Batch/range/image import, JPEG options, cancellation |
-| C-01 / C-02 / C-06 | QPDF token/source spans, bounded graphics/text-state interpretation, actual standard-font Tj/TJ replacement, downstream advance preservation, shared-stream isolation, on-page editing | General content IR, custom/subset fonts, multilingual shaping, embedded fonts, form XObjects, rotated/clipped content, paragraph editing |
+| C-01 / C-02 / C-06 | QPDF token/source spans, bounded graphics/text-state interpretation, Tj/TJ replacement for standard, simple, embedded/subset and Identity-H CID fonts, Unicode text with automatic fallback-font subset embedding, downstream advance preservation, shared-stream isolation, on-page editing | General content IR, shaping/RTL scripts, non-Identity CMaps, CFF fallback fonts, font reuse across edits, form XObjects, rotated/clipped content, paragraph editing |
 | Q-01 | Generated fixture ownership and semantic/raster tests | Independent-viewer release corpus and formal manifest |
 
 All other items remain unimplemented. The constrained text-editing subset does not represent the full text/content engine. The conversion suite, annotations, forms, signing, recovery, printing, and installers are not represented as complete.
@@ -35,4 +35,12 @@ All other items remain unimplemented. The constrained text-editing subset does n
 
 ## Next bounded milestone
 
-Expand font/source-mapping qualification before enabling custom/subset or multilingual text editing. Implement page-range extraction with source-preservation tests, recovery, and an isolated renderer. Qualify structured-document preservation before relaxing the current read-only gates.
+Add a shaping engine (RTL/Indic) and paragraph reflow to text editing. Implement page-range extraction with source-preservation tests, recovery, and an isolated renderer. Qualify structured-document preservation before relaxing the current read-only gates.
+
+## Update — portability, isolation and history
+
+- Builds are configured through `FOLIOFORGE_PREFIX_PATH` / `PDFIUM_ROOT` (no hardcoded machine paths); `scripts/fetch-pdfium.py` downloads PDFium; `vcpkg.json` provides QPDF for CI; CTest sets library search paths itself. See `docs/building.md`.
+- GitHub Actions builds and runs all suites on Windows, Linux and macOS. Locally verified so far on macOS arm64 only; the Windows and Linux legs are unverified until CI runs.
+- Rendering, text extraction and validation run in the `pdfeditor-render` worker with timeouts, crash recovery and per-platform restrictions (ADR-002).
+- Undo history spills to disk; snapshot/file cap raised from 256 MiB to 1 GiB. Whole-snapshot storage remains, so very large PDFs still cost a full re-serialization per edit.
+- Still open: Linux seccomp and Windows AppContainer for the worker, delta/incremental history, custom/subset/multilingual text editing, paragraph editing, annotations, forms, signing, crash recovery.

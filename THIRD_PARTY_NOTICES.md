@@ -4,11 +4,11 @@ This development build consumes installed Qt, QPDF, PDFium, zlib, and libjpeg-tu
 
 Installed notice locations:
 
-- Qt: `C:/Qt/Licenses` and the installed Qt distribution's licensing materials.
-- QPDF: `C:/projects/vPDF/vcpkg_installed/x64-windows/share/qpdf/copyright`.
-- zlib: `C:/projects/vPDF/vcpkg_installed/x64-windows/share/zlib/copyright`.
-- libjpeg-turbo: `C:/projects/vPDF/vcpkg_installed/x64-windows/share/libjpeg-turbo/copyright`.
-- PDFium: `C:/projects/vPDF/third_party/pdfium/LICENSE` and its `licenses/` directory.
+- Qt: `<Qt install>/Licenses` and the installed Qt distribution's licensing materials.
+- QPDF: `<QPDF prefix>/share/qpdf/copyright`.
+- zlib: `<QPDF prefix>/share/zlib/copyright`.
+- libjpeg-turbo: `<QPDF prefix>/share/libjpeg-turbo/copyright`.
+- PDFium: `<PDFIUM_ROOT>/LICENSE` and its `licenses/` directory.
 
 The fixture PDFs are generated from original test instructions using a standard Helvetica font reference; they embed no third-party font file, customer data, or private document. Desktop UI fonts are supplied by the operating system, not bundled by this project. The architecture/mockup were supplied in the workspace and their redistribution rights have not been independently reviewed.
 

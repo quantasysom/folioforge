@@ -1,10 +1,11 @@
 #include "window.h"
 #include "text_canvas.h"
-#include "pdfengine/renderer.h"
+#include "pdfengine/render_service.h"
 #include <QtWidgets>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QFutureWatcher>
 #include <algorithm>
+#include <cstring>
 
 using namespace pdfengine;
 namespace {
@@ -21,6 +22,50 @@ QString displayPath(const std::filesystem::path& path) {
 #else
     return QString::fromUtf8(path.string().c_str());
 #endif
+}
+bool isImagePath(const QString& path) {
+    for (const char* suffix : {".png", ".jpg", ".jpeg"}) if (path.endsWith(suffix, Qt::CaseInsensitive)) return true;
+    return false;
+}
+// Keeps JPEGs byte-for-byte when possible; everything else is decoded to gray/RGB (+ alpha) samples.
+ImagePage loadImage(const QString& path) {
+    QImageReader reader(path); reader.setAutoTransform(true);
+    if (!reader.canRead()) throw Error(ErrorCode::InvalidDocument, QString("%1 is not a readable image.").arg(QFileInfo(path).fileName()).toStdString());
+    const auto size = reader.size();
+    if (size.isValid() && static_cast<qint64>(size.width()) * size.height() > 100'000'000)
+        throw Error(ErrorCode::ResourceLimit, "Images larger than 100 megapixels are not supported.");
+    if (reader.format().toLower() == "jpeg" && reader.transformation() == QImageIOHandler::TransformationNone) {
+        QFile file(path);
+        if (file.open(QIODevice::ReadOnly) && static_cast<std::uint64_t>(file.size()) <= maxDocumentBytes) {
+            auto data = file.readAll();
+            try { return jpegImage(Bytes(data.begin(), data.end())); }
+            catch (const Error& e) { if (e.code != ErrorCode::Unsupported) throw; }
+        }
+    }
+    QImage image = reader.read();
+    if (image.isNull()) throw Error(ErrorCode::InvalidDocument, "The image could not be decoded.");
+    ImagePage page; page.width = image.width(); page.height = image.height();
+    double dpi = image.dotsPerMeterX() * 0.0254;
+    page.dpi = dpi > 72.5 ? dpi : 0;
+    const bool alpha = image.hasAlphaChannel();
+    const bool gray = !alpha && image.isGrayscale();
+    image = image.convertToFormat(alpha ? QImage::Format_RGBA8888 : gray ? QImage::Format_Grayscale8 : QImage::Format_RGB888);
+    const int channels = alpha ? 4 : gray ? 1 : 3, components = gray ? 1 : 3;
+    page.components = components;
+    page.data.resize(static_cast<std::size_t>(page.width) * page.height * components);
+    if (alpha) page.alpha.resize(static_cast<std::size_t>(page.width) * page.height);
+    bool translucent = false;
+    for (int y = 0; y < image.height(); ++y) {
+        const uchar* row = image.constScanLine(y);
+        auto out = page.data.data() + static_cast<std::size_t>(y) * page.width * components;
+        if (!alpha) { std::memcpy(out, row, static_cast<std::size_t>(page.width) * components); continue; }
+        auto mask = page.alpha.data() + static_cast<std::size_t>(y) * page.width;
+        for (std::uint32_t x = 0; x < page.width; ++x) {
+            std::memcpy(out + x * 3, row + x * channels, 3); mask[x] = row[x * channels + 3]; translucent |= mask[x] != 255;
+        }
+    }
+    if (!translucent) page.alpha.clear();
+    return page;
 }
 QImage imageOf(const Bitmap& bitmap) {
     return QImage(bitmap.bgra.data(), bitmap.width, bitmap.height, bitmap.stride, QImage::Format_ARGB32).copy();
@@ -61,11 +106,11 @@ DocumentPane::DocumentPane(QWidget* parent) : QWidget(parent) {
     text = new QPlainTextEdit; text->setReadOnly(true); text->setPlaceholderText("Extracted page text appears here."); text->setAccessibleName("Accessible extracted page text");
     propertiesLayout->addWidget(title); propertiesLayout->addWidget(properties); propertiesLayout->addSpacing(16);
     propertiesLayout->addWidget(new QLabel("Page text")); propertiesLayout->addWidget(text, 1);
-    auto scope = new QLabel("Preview · Local files only\n\nEdit text supports standard Helvetica/Courier ASCII runs. Custom fonts, forms, signing, and redaction are not yet available.");
+    auto scope = new QLabel("Preview · Local files only\n\nClick-to-type editing supports standard Helvetica/Courier ASCII text; later text on the line reflows. Custom fonts, forms, signing, and redaction are not yet available.");
     scope->setWordWrap(true); scope->setStyleSheet("color:#596579;font-size:11px;"); propertiesLayout->addWidget(scope);
     split->addWidget(inspector); split->setStretchFactor(1, 1); split->setSizes({220, 850, 260});
 }
-Window::Window(bool smoke) : smoke_(smoke) {
+Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(std::move(renderer)), smoke_(smoke) {
     worker_.setMaxThreadCount(1);
     setWindowTitle("FolioForge · PDF editor preview"); resize(1440, 900); setMinimumSize(1024, 700); setAcceptDrops(true);
     tabs_ = new QTabWidget; tabs_->setTabsClosable(true); tabs_->setMovable(true); tabs_->setDocumentMode(true); setCentralWidget(tabs_);
@@ -81,9 +126,14 @@ Window::Window(bool smoke) : smoke_(smoke) {
     auto create = action(file, "&New PDF", QKeySequence::New, [this] { newDocument(); });
     create->setIcon(style()->standardIcon(QStyle::SP_FileIcon)); toolbar->addAction(create);
     auto open = action(file, "&Open PDF…", QKeySequence::Open, [this] {
-        auto paths = QFileDialog::getOpenFileNames(this, "Open PDF", {}, "PDF files (*.pdf)"); for (auto& path : paths) openPath(path);
+        auto paths = QFileDialog::getOpenFileNames(this, "Open PDF or image", {}, "PDF and images (*.pdf *.png *.jpg *.jpeg);;PDF files (*.pdf);;Images (*.png *.jpg *.jpeg)");
+        for (auto& path : paths) openPath(path);
     });
     open->setIcon(style()->standardIcon(QStyle::SP_DialogOpenButton)); toolbar->addAction(open);
+    action(file, "Images to new PDF…", QKeySequence("Ctrl+Shift+I"), [this] {
+        auto paths = QFileDialog::getOpenFileNames(this, "Convert images to one PDF (one image per page)", {}, "Images (*.png *.jpg *.jpeg)"); openImages(paths);
+    });
+    file->addSeparator();
     save_ = action(file, "&Save", QKeySequence::Save, [this] { save(active(), false); });
     save_->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton)); toolbar->addAction(save_);
     saveAs_ = action(file, "Save &As…", QKeySequence::SaveAs, [this] { save(active(), true); });
@@ -102,7 +152,7 @@ Window::Window(bool smoke) : smoke_(smoke) {
         if (p->canvas->editMode) {
             p->canvas->setFocus();
             statusBar()->showMessage(p->textInventory.runs.empty() ? QString::fromStdString(p->textInventory.explanation) :
-                "Click an outlined run to edit. Arrow keys select a run; Enter edits. Enter commits, Escape cancels. Text must fit its original slot.");
+                "Click text on the page to place a cursor and type. Enter or clicking elsewhere applies, Escape cancels. Left/Right select a run; Enter or F2 edits it.");
         }
     });
     editText_->setCheckable(true); toolbar->addAction(editText_);
@@ -120,13 +170,26 @@ Window::Window(bool smoke) : smoke_(smoke) {
         auto id = p->info.pages[p->currentPage].id; auto rev = p->info.revision;
         run(p, "Inserting PDF", [p, path, id, rev] { p->document->insertDocument(localPath(path), id, rev); }, [this, p] { render(p); });
     });
+    insertImage_ = action(page, "Insert image…", {}, [this] {
+        auto p = active(); if (!p || p->busy || !p->document) return;
+        auto paths = QFileDialog::getOpenFileNames(this, "Insert images after the current page", {}, "Images (*.png *.jpg *.jpeg)"); if (paths.isEmpty()) return;
+        auto id = p->info.pages[p->currentPage].id; auto rev = p->info.revision;
+        run(p, "Inserting images", [p, paths, id, rev] {
+            auto after = id; auto revision = rev;
+            for (const auto& path : paths) {
+                p->document->insertImage(loadImage(path), after, revision);
+                auto info = p->document->info(); revision = info.revision;
+                for (std::size_t i = 0; i < info.pages.size(); ++i) if (info.pages[i].id == after) { after = info.pages[i + 1].id; break; }
+            }
+        }, [this, p] { render(p); });
+    });
     duplicate_ = action(page, "Duplicate", {}, [this] { command(CommandKind::Duplicate); });
     left_ = action(page, "Rotate left", {}, [this] { command(CommandKind::RotateLeft); });
     right_ = action(page, "Rotate right", {}, [this] { command(CommandKind::RotateRight); });
     earlier_ = action(page, "Move earlier", {}, [this] { command(CommandKind::MoveEarlier); });
     later_ = action(page, "Move later", {}, [this] { command(CommandKind::MoveLater); });
     delete_ = action(page, "Delete page", {}, [this] { command(CommandKind::Delete); });
-    for (auto a : {insert_, merge_, duplicate_, left_, right_, earlier_, later_, delete_}) organize->addAction(a);
+    for (auto a : {insert_, merge_, insertImage_, duplicate_, left_, right_, earlier_, later_, delete_}) organize->addAction(a);
     toolbar->addSeparator(); toolbar->addAction(find_);
     auto prev = action(view, "Previous page", QKeySequence("Alt+Up"), [this] { auto p = active(); if (p && !p->busy && !p->canvas->editing()) p->pages->setCurrentRow(std::max(0, p->currentPage - 1)); });
     auto next = action(view, "Next page", QKeySequence("Alt+Down"), [this] { auto p = active(); if (p && !p->busy && !p->canvas->editing()) p->pages->setCurrentRow(std::min(p->pages->count() - 1, p->currentPage + 1)); });
@@ -147,10 +210,10 @@ Window::Window(bool smoke) : smoke_(smoke) {
     auto welcome = new QWidget; auto layout = new QVBoxLayout(welcome); layout->setAlignment(Qt::AlignCenter);
     auto brand = new QLabel("FolioForge"); QFont font = brand->font(); font.setPointSize(30); font.setBold(true); brand->setFont(font); brand->setAlignment(Qt::AlignCenter);
     auto subtitle = new QLabel("A clear workspace for your PDFs."); subtitle->setAlignment(Qt::AlignCenter);
-    auto openButton = new QPushButton("Open PDF"); openButton->setMinimumSize(220, 44); connect(openButton, &QPushButton::clicked, open, &QAction::trigger);
+    auto openButton = new QPushButton("Open PDF or image"); openButton->setMinimumSize(220, 44); connect(openButton, &QPushButton::clicked, open, &QAction::trigger);
     auto newButton = new QPushButton("Create a blank PDF"); newButton->setMinimumSize(220, 40); connect(newButton, &QPushButton::clicked, create, &QAction::trigger);
     layout->addWidget(brand); layout->addWidget(subtitle); layout->addSpacing(24); layout->addWidget(openButton, 0, Qt::AlignCenter); layout->addWidget(newButton, 0, Qt::AlignCenter);
-    auto hint = new QLabel("Open · Read · Search · Organize · Save\n\nDrop PDF files here to open separate tabs."); hint->setAlignment(Qt::AlignCenter); layout->addSpacing(24); layout->addWidget(hint);
+    auto hint = new QLabel("Open · Read · Search · Organize · Save\n\nDrop PDFs or JPG/PNG images here. PDFs open in separate tabs; dropped images become one PDF."); hint->setAlignment(Qt::AlignCenter); layout->addSpacing(24); layout->addWidget(hint);
     tabs_->addTab(welcome, "Start"); tabs_->tabBar()->setTabButton(0, QTabBar::RightSide, nullptr);
     statusBar()->showMessage("Ready · Files stay on this computer"); updateActions();
     if (!smoke_) { QSettings settings; restoreGeometry(settings.value("windowGeometry").toByteArray()); }
@@ -194,9 +257,9 @@ int Window::advanceSmokeTest() {
         p->pages->setCurrentRow(0); break;
     case 10:
         if (p->currentPage != 0 || !p->info.dirty) return -1;
-        run(p, "Smoke save and reopen", [p] {
+        run(p, "Smoke save and reopen", [p, renderer = renderer_] {
             auto path = std::filesystem::current_path() / "desktop-smoke-output.pdf";
-            Renderer::validate(p->document->snapshot()); p->document->save(path, true);
+            renderer->validate(p->document->snapshot()); p->document->save(path, true);
             p->document = Document::open(path);
         }, [this, p] { render(p); }); break;
     case 11:
@@ -231,12 +294,40 @@ int Window::advanceSmokeTest() {
         redo_->trigger(); break;
     case 14:
         if (!p->text->toPlainText().contains("Folio edit")) return -1;
-        run(p, "Saving text edit", [p] {
+        run(p, "Saving text edit", [p, renderer = renderer_] {
             auto path = std::filesystem::current_path() / "desktop-smoke-text-output.pdf";
-            Renderer::validate(p->document->snapshot()); p->document->save(path, true); p->document = Document::open(path);
+            renderer->validate(p->document->snapshot()); p->document->save(path, true); p->document = Document::open(path);
         }, [this, p] { render(p); }); break;
+    case 15:
+        if (p->info.dirty || !p->text->toPlainText().contains("Folio edit") || p->canvas->runs.size() != 1) return -1;
+        {
+            // A click places a caret instead of selecting the whole run, and typing may outgrow the original slot.
+            auto point = p->canvas->box(0).center();
+            QMouseEvent click(QEvent::MouseButtonPress, point, point, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(p->canvas, &click);
+        }
+        if (!p->canvas->editing() || p->canvas->editor->hasSelectedText() || p->canvas->editor->cursorPosition() <= 0) return -1;
+        {
+            const int original = p->canvas->editor->width();
+            p->canvas->editor->setText("Folio edit, now longer");
+            if (p->canvas->editor->width() <= original) return -1;
+            QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier); QApplication::sendEvent(p->canvas->editor, &enter);
+        }
+        break;
+    case 16:
+        if (!p->info.dirty || !p->text->toPlainText().contains("now longer")) return -1;
+        {
+            QImage picture(64, 32, QImage::Format_ARGB32); picture.fill(QColor(200, 30, 30, 255)); picture.setPixelColor(0, 0, QColor(0, 0, 0, 0));
+            auto path = QDir::current().absoluteFilePath("smoke-image.png");
+            if (!picture.save(path)) return -1;
+            openPath(path);
+        }
+        break;
+    case 17:
+        if (!p->info.dirty || p->info.pages.size() != 1 || std::abs(p->info.pages[0].width - 48) > 0.01 || std::abs(p->info.pages[0].height - 24) > 0.01) return -1;
+        if (tabs_->tabText(tabs_->currentIndex()) != "smoke-image.pdf *") return -1;
+        return 1;
     default:
-        if (p->info.dirty || !p->text->toPlainText().contains("Folio edit")) return -1;
         return 1;
     }
     return 0;
@@ -252,7 +343,24 @@ DocumentPane* Window::addPane(const QString& title) {
     return p;
 }
 void Window::newDocument() { auto p = addPane("Untitled.pdf"); run(p, "Creating PDF", [p] { p->document = Document::create(); }, [this, p] { render(p); }); }
-void Window::openPath(const QString& path) { auto p = addPane(QFileInfo(path).fileName()); p->setProperty("openingPath", path); load(p, path); }
+void Window::openImages(const QStringList& paths) {
+    if (paths.isEmpty()) return;
+    auto p = addPane(QFileInfo(paths.first()).completeBaseName() + ".pdf");
+    p->setProperty("suggestedName", QFileInfo(paths.first()).completeBaseName() + ".pdf");
+    run(p, "Converting images to PDF", [p, paths] {
+        std::shared_ptr<Document> document;
+        for (const auto& path : paths) {
+            auto image = loadImage(path);
+            if (!document) document = Document::createFromImage(image);
+            else { auto info = document->info(); document->insertImage(image, info.pages.back().id, info.revision); }
+        }
+        p->document = document;
+    }, [this, p] { render(p); }, [this, p] { tabs_->removeTab(tabs_->indexOf(p)); p->deleteLater(); updateActions(); });
+}
+void Window::openPath(const QString& path) {
+    if (isImagePath(path)) { openImages({path}); return; }
+    auto p = addPane(QFileInfo(path).fileName()); p->setProperty("openingPath", path); load(p, path);
+}
 void Window::load(DocumentPane* p, const QString& path, const QString& password) {
     run(p, "Opening PDF", [p, path, password] { p->document = Document::open(localPath(path), password.toUtf8().toStdString()); }, [this, p] { render(p); });
 }
@@ -296,7 +404,8 @@ void Window::refresh(DocumentPane* p) {
         p->matches->clear();
     }
     p->pages->setCurrentRow(p->currentPage);
-    auto name = p->info.path.empty() ? "Untitled.pdf" : QFileInfo(displayPath(p->info.path)).fileName();
+    auto suggested = p->property("suggestedName").toString();
+    auto name = p->info.path.empty() ? (suggested.isEmpty() ? "Untitled.pdf" : suggested) : QFileInfo(displayPath(p->info.path)).fileName();
     tabs_->setTabText(tabs_->indexOf(p), name + (p->info.dirty ? " *" : ""));
     QString notice = QString::fromStdString(p->info.restriction);
     if (p->info.historyPruned) notice += " Older undo history was discarded to stay within the memory budget.";
@@ -312,9 +421,9 @@ void Window::render(DocumentPane* p, std::function<void()> done) {
     int page = p->currentPage; double scale = p->scale; double dpr = devicePixelRatioF(); auto snap = p->document->snapshot();
     // Never show the previous page as if it belonged to a newly selected revision.
     p->canvas->runs.clear(); p->canvas->clear(); p->canvas->setText("Rendering page…"); p->text->clear(); p->image = {};
-    run(p, "Rendering page", [p, snap, page, scale, dpr, result] {
-        result->image = imageOf(Renderer::render(snap, page, scale * dpr)); result->image.setDevicePixelRatio(dpr);
-        try { result->text = QString::fromStdU16String(Renderer::text(snap, page)); }
+    run(p, "Rendering page", [p, snap, page, scale, dpr, result, renderer = renderer_] {
+        result->image = imageOf(renderer->render(snap, page, scale * dpr)); result->image.setDevicePixelRatio(dpr);
+        try { result->text = QString::fromStdU16String(renderer->text(snap, page)); }
         catch (const std::exception&) { result->text = "Text extraction is unavailable for this page. The rendered page remains viewable."; }
         try { result->inventory = p->document->textRuns(snap.pages.at(page)); }
         catch (const std::exception&) { result->inventory.explanation = "Text analysis is unavailable for this page. Viewing remains available."; }
@@ -342,7 +451,7 @@ void Window::updateActions() {
     applyText_->setVisible(editing); cancelText_->setVisible(editing);
     editText_->setEnabled(ready);
     { QSignalBlocker block(editText_); editText_->setChecked(p && p->canvas->editMode); }
-    for (auto a : {save_, saveAs_, insert_, merge_, duplicate_, left_, right_, earlier_, later_, delete_}) a->setEnabled(editable);
+    for (auto a : {save_, saveAs_, insert_, merge_, insertImage_, duplicate_, left_, right_, earlier_, later_, delete_}) a->setEnabled(editable);
     save_->setEnabled(canSave && (p->info.dirty || editing)); saveAs_->setEnabled(canSave);
     undo_->setEnabled(editable && p->info.canUndo); redo_->setEnabled(editable && p->info.canRedo);
     delete_->setEnabled(editable && p->info.pages.size() > 1); earlier_->setEnabled(editable && p->currentPage > 0);
@@ -369,7 +478,7 @@ void Window::save(DocumentPane* p, bool saveAs, std::function<void()> done) {
     }
     QString path = displayPath(p->info.path); bool overwrite = !saveAs && !path.isEmpty();
     if (saveAs || path.isEmpty()) {
-        path = QFileDialog::getSaveFileName(this, "Save PDF", path.isEmpty() ? "Untitled.pdf" : path, "PDF files (*.pdf)", nullptr, QFileDialog::DontConfirmOverwrite);
+        path = QFileDialog::getSaveFileName(this, "Save PDF", path.isEmpty() ? (p->property("suggestedName").toString().isEmpty() ? "Untitled.pdf" : p->property("suggestedName").toString()) : path, "PDF files (*.pdf)", nullptr, QFileDialog::DontConfirmOverwrite);
         if (path.isEmpty()) return; if (!path.endsWith(".pdf", Qt::CaseInsensitive)) path += ".pdf";
         // Confirm the final path once, after normalizing the extension.
         if (QFileInfo::exists(path)) {
@@ -377,7 +486,7 @@ void Window::save(DocumentPane* p, bool saveAs, std::function<void()> done) {
             overwrite = true;
         }
     }
-    run(p, "Validating and saving PDF", [p, path, overwrite] { Renderer::validate(p->document->snapshot()); p->document->save(localPath(path), overwrite); }, [this, done] { statusBar()->showMessage("PDF saved and validated", 6000); if (done) done(); });
+    run(p, "Validating and saving PDF", [p, path, overwrite, renderer = renderer_] { renderer->validate(p->document->snapshot()); p->document->save(localPath(path), overwrite); }, [this, done] { statusBar()->showMessage("PDF saved and validated", 6000); if (done) done(); });
 }
 void Window::closeTab(int index) {
     auto p = dynamic_cast<DocumentPane*>(tabs_->widget(index)); if (!p || p->busy) return;
@@ -404,13 +513,21 @@ void Window::closeEvent(QCloseEvent* event) {
     event->accept();
 }
 void Window::dragEnterEvent(QDragEnterEvent* event) { if (event->mimeData()->hasUrls()) event->acceptProposedAction(); }
-void Window::dropEvent(QDropEvent* event) { for (const auto& url : event->mimeData()->urls()) if (url.isLocalFile() && url.toLocalFile().endsWith(".pdf", Qt::CaseInsensitive)) openPath(url.toLocalFile()); event->acceptProposedAction(); }
+void Window::dropEvent(QDropEvent* event) {
+    QStringList images;
+    for (const auto& url : event->mimeData()->urls()) {
+        if (!url.isLocalFile()) continue;
+        auto path = url.toLocalFile();
+        if (path.endsWith(".pdf", Qt::CaseInsensitive)) openPath(path); else if (isImagePath(path)) images << path;
+    }
+    openImages(images); event->acceptProposedAction();
+}
 void Window::search(DocumentPane* p) {
     if (p->busy || !p->document || p->query->text().trimmed().isEmpty()) return;
     auto result = std::make_shared<QList<QPair<int, QString>>>(); auto query = p->query->text(); auto snapshot = p->document->snapshot();
-    run(p, "Searching PDF", [snapshot, query, result] {
+    run(p, "Searching PDF", [snapshot, query, result, renderer = renderer_] {
         for (std::size_t i = 0; i < snapshot.pages.size(); ++i) {
-            auto text = QString::fromStdU16String(Renderer::text(snapshot, i)); auto offset = text.indexOf(query, 0, Qt::CaseInsensitive);
+            auto text = QString::fromStdU16String(renderer->text(snapshot, i)); auto offset = text.indexOf(query, 0, Qt::CaseInsensitive);
             if (offset >= 0) result->append({static_cast<int>(i), text.mid(std::max<qsizetype>(0, offset - 35), 120).simplified()});
         }
     }, [this, p, result] {
@@ -423,8 +540,8 @@ void Window::exportImage() {
     auto p = active(); if (!p || p->busy) return;
     auto path = exportPath(this, "Export current page at 144 DPI", "png", "PNG image (*.png)"); if (path.isEmpty()) return;
     auto snapshot = p->document->snapshot(); int page = p->currentPage;
-    run(p, "Exporting PNG", [snapshot, page, path] {
-        auto image = imageOf(Renderer::render(snapshot, page, 2)); image.setDotsPerMeterX(5669); image.setDotsPerMeterY(5669);
+    run(p, "Exporting PNG", [snapshot, page, path, renderer = renderer_] {
+        auto image = imageOf(renderer->render(snapshot, page, 2)); image.setDotsPerMeterX(5669); image.setDotsPerMeterY(5669);
         QSaveFile output(path); output.setDirectWriteFallback(false);
         if (!output.open(QIODevice::WriteOnly) || !image.save(&output, "PNG") || !output.commit()) throw Error(ErrorCode::SaveFailed, "The PNG could not be saved.");
     });
@@ -433,10 +550,10 @@ void Window::exportText() {
     auto p = active(); if (!p || p->busy) return;
     auto path = exportPath(this, "Export UTF-8 document text", "txt", "Text (*.txt)"); if (path.isEmpty()) return;
     auto snapshot = p->document->snapshot();
-    run(p, "Exporting text", [snapshot, path] {
+    run(p, "Exporting text", [snapshot, path, renderer = renderer_] {
         QSaveFile output(path); output.setDirectWriteFallback(false); if (!output.open(QIODevice::WriteOnly)) throw Error(ErrorCode::SaveFailed, "The text output could not be opened.");
         for (std::size_t i = 0; i < snapshot.pages.size(); ++i) {
-            auto bytes = QString::fromStdU16String(Renderer::text(snapshot, i)).toUtf8() + "\n\f\n";
+            auto bytes = QString::fromStdU16String(renderer->text(snapshot, i)).toUtf8() + "\n\f\n";
             if (output.write(bytes) != bytes.size()) throw Error(ErrorCode::SaveFailed, "The text output could not be written.");
         }
         if (!output.commit()) throw Error(ErrorCode::SaveFailed, "The text output could not be saved.");
@@ -450,24 +567,35 @@ void Window::beginTextEdit(DocumentPane* p, int index, const QString* retry) {
     auto editor = new InlineEditor(p->canvas); p->canvas->editor = editor;
     editor->setProperty("runIndex", index);
     editor->setAccessibleName("Edit PDF text in place"); editor->setMaxLength(4096);
+    editor->setValidator(new QRegularExpressionValidator(QRegularExpression("[\\x{20}-\\x{7E}]*"), editor));
     editor->setText(retry ? *retry : QString::fromStdString(run.text));
-    auto bounds = p->canvas->box(index).toAlignedRect();
-    bounds.setWidth(std::min(std::max(bounds.width(), 80), p->canvas->width() - bounds.x()));
-    bounds.setHeight(std::max(bounds.height(), 28)); editor->setGeometry(bounds);
     QFont font(run.font.starts_with("Courier") ? "Courier New" : "Arial");
     font.setPixelSize(std::max(6, qRound(run.fontSize * p->scale))); font.setBold(run.font.find("Bold") != std::string::npos);
     font.setItalic(run.font.find("Oblique") != std::string::npos); editor->setFont(font);
-    editor->setStyleSheet("QLineEdit { background: white; color: #18212F; border: 2px solid #1769E8; padding: 0px; }");
-    editor->setToolTip("Save (Ctrl+S) applies and saves. Apply text or Enter applies without saving. Escape cancels.");
+    editor->setStyleSheet("QLineEdit { background: white; color: #111; border: none; border-bottom: 1px solid #1769E8; padding: 0px; selection-background-color: #B5D3FF; selection-color: #111; }");
+    // Place the widget so its text baseline and left edge coincide with the PDF run, then grow it as the user types.
+    const QFontMetrics metrics(font);
+    const int height = metrics.height() + 4, left = qRound(run.x * p->scale) - 2;
+    const int top = qRound((p->canvas->pageHeight - run.baseline) * p->scale) - (height - metrics.height()) / 2 - metrics.ascent();
+    const int minimum = std::max(qRound(run.width * p->scale) + 12, 24), limit = std::max(minimum, p->canvas->width() - left);
+    auto fit = [editor, metrics, left, top, height, minimum, limit] {
+        editor->setGeometry(left, top, std::min(std::max(metrics.horizontalAdvance(editor->text()) + 12, minimum), limit), height);
+    };
+    fit(); connect(editor, &QLineEdit::textChanged, editor, fit);
+    editor->setToolTip("Type to edit. Enter or clicking elsewhere applies, Escape cancels. Save (Ctrl+S) applies and saves.");
     editor->cancel = [this, p] { cancelTextEdit(p); };
+    editor->commit = [this, p, index] { commitTextEdit(p, index); };
     connect(editor, &QLineEdit::returnPressed, this, [this, p, index] { commitTextEdit(p, index); });
     p->pages->setEnabled(false); p->query->setEnabled(false); p->matches->setEnabled(false);
-    editor->show(); editor->raise(); editor->setFocus(); editor->selectAll(); p->canvas->update(); updateActions();
-    statusBar()->showMessage("Save / Ctrl+S applies and saves · Apply text / Enter applies only · Cancel edit / Escape cancels");
+    editor->show(); editor->raise(); editor->setFocus();
+    if (retry || p->canvas->pressPoint.x() < 0) editor->setCursorPosition(editor->text().size());
+    else editor->setCursorPosition(editor->cursorPositionAt(editor->mapFrom(p->canvas, p->canvas->pressPoint.toPoint())));
+    p->canvas->pressPoint = {-1, -1}; p->canvas->update(); updateActions();
+    statusBar()->showMessage("Type to edit · Enter or click elsewhere applies · Escape cancels · Ctrl+S applies and saves");
 }
 void Window::cancelTextEdit(DocumentPane* p) {
     if (!p || !p->canvas->editor) return;
-    auto editor = p->canvas->editor; p->canvas->editor = nullptr; editor->hide(); editor->deleteLater();
+    auto editor = p->canvas->editor; p->canvas->editor = nullptr; editor->finished = true; editor->hide(); editor->deleteLater();
     p->pages->setEnabled(true); p->query->setEnabled(true); p->matches->setEnabled(true);
     p->canvas->setFocus(); p->canvas->update(); updateActions(); statusBar()->showMessage("Text edit cancelled");
 }
@@ -475,6 +603,7 @@ void Window::commitTextEdit(DocumentPane* p, int index, std::function<void()> do
     if (!p || p->busy || !p->canvas->editing() || index < 0 || index >= static_cast<int>(p->canvas->runs.size())) return;
     auto input = p->canvas->editor->text(); auto run = p->canvas->runs[index];
     cancelTextEdit(p);
+    if (input.toStdString() == run.text) return;
     ReplaceText request{run.page, run.id, run.revision, input.toUtf8().toStdString()};
     this->run(p, "Applying text edit", [p, request] { p->document->replaceText(request); }, [this, p, done] { render(p, done); },
         [this, p, index, input] { beginTextEdit(p, index, &input); });

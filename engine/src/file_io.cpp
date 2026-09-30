@@ -14,7 +14,7 @@ Bytes readFile(const std::filesystem::path& path) {
     std::ifstream stream(path, std::ios::binary | std::ios::ate);
     if (!stream) throw Error(ErrorCode::InvalidDocument, "The file could not be opened.");
     auto size = stream.tellg();
-    if (size < 0 || size > 256ll * 1024 * 1024) throw Error(ErrorCode::ResourceLimit, "This preview supports files up to 256 MiB.");
+    if (size < 0 || static_cast<std::uint64_t>(size) > maxDocumentBytes) throw Error(ErrorCode::ResourceLimit, "This preview supports files up to 1 GiB.");
     Bytes bytes(static_cast<std::size_t>(size));
     stream.seekg(0);
     if (!stream.read(reinterpret_cast<char*>(bytes.data()), size)) throw Error(ErrorCode::InvalidDocument, "The complete file could not be read.");

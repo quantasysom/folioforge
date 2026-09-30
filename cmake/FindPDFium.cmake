@@ -1,4 +1,4 @@
-set(PDFIUM_ROOT "" CACHE PATH "PDFium distribution with include, lib, and bin directories")
+set(PDFIUM_ROOT "$ENV{PDFIUM_ROOT}" CACHE PATH "PDFium distribution with include, lib, and bin directories (see scripts/fetch-pdfium.py)")
 find_path(PDFIUM_INCLUDE_DIR fpdfview.h HINTS "${PDFIUM_ROOT}" PATH_SUFFIXES include public)
 find_library(PDFIUM_LIBRARY NAMES pdfium pdfium.dll HINTS "${PDFIUM_ROOT}" PATH_SUFFIXES lib)
 include(FindPackageHandleStandardArgs)
@@ -7,4 +7,10 @@ if(PDFium_FOUND AND NOT TARGET PDFium::PDFium)
   add_library(PDFium::PDFium UNKNOWN IMPORTED)
   set_target_properties(PDFium::PDFium PROPERTIES IMPORTED_LOCATION "${PDFIUM_LIBRARY}"
     INTERFACE_INCLUDE_DIRECTORIES "${PDFIUM_INCLUDE_DIR}")
+  # Directory holding the runtime library (DLL beside lib\ on Windows), used for tests and deployment.
+  if(WIN32)
+    set(PDFIUM_RUNTIME_DIR "${PDFIUM_ROOT}/bin")
+  else()
+    get_filename_component(PDFIUM_RUNTIME_DIR "${PDFIUM_LIBRARY}" DIRECTORY)
+  endif()
 endif()

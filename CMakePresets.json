@@ -1,16 +1,36 @@
 {
   "version": 6,
-  "configurePresets": [{
-    "name": "dev", "displayName": "Local Windows / MSVC dependencies",
-    "generator": "Ninja", "binaryDir": "${sourceDir}/build/gui",
-    "cacheVariables": {
-      "CMAKE_BUILD_TYPE": "Release",
-      "CMAKE_MAKE_PROGRAM": "C:/Qt/Tools/Ninja/ninja.exe",
-      "CMAKE_PREFIX_PATH": "C:/Qt/6.11.1/msvc2022_64;C:/projects/vPDF/vcpkg_installed/x64-windows",
-      "PDFIUM_ROOT": "C:/projects/vPDF/third_party/pdfium"
+  "cmakeMinimumRequired": {"major": 3, "minor": 25, "patch": 0},
+  "configurePresets": [
+    {
+      "name": "dev", "displayName": "Local build using environment-provided dependencies",
+      "description": "Set FOLIOFORGE_PREFIX_PATH (Qt/QPDF prefixes, ';'-separated) and PDFIUM_ROOT, or see docs/building.md. Copy to CMakeUserPresets.json to pin machine-specific paths.",
+      "generator": "Ninja", "binaryDir": "${sourceDir}/build/gui",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_PREFIX_PATH": "$env{FOLIOFORGE_PREFIX_PATH}",
+        "PDFIUM_ROOT": "$env{PDFIUM_ROOT}"
+      }
+    },
+    {
+      "name": "ci", "displayName": "CI: vcpkg manifest QPDF + downloaded PDFium",
+      "inherits": "dev", "binaryDir": "${sourceDir}/build/ci",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+    },
+    {
+      "name": "headless", "displayName": "Engine, CLI and tests only (no Qt)",
+      "inherits": "dev", "binaryDir": "${sourceDir}/build/headless",
+      "cacheVariables": {"FOLIOFORGE_DESKTOP": "OFF"}
     }
-  }],
-  "buildPresets": [{"name": "dev", "configurePreset": "dev"}],
-  "testPresets": [{"name": "dev", "configurePreset": "dev", "output": {"outputOnFailure": true},
-    "environment": {"PATH": "C:/Qt/6.11.1/msvc2022_64/bin;C:/projects/vPDF/vcpkg_installed/x64-windows/bin;C:/projects/vPDF/third_party/pdfium/bin;$penv{PATH}"}}]
+  ],
+  "buildPresets": [
+    {"name": "dev", "configurePreset": "dev"},
+    {"name": "ci", "configurePreset": "ci"},
+    {"name": "headless", "configurePreset": "headless"}
+  ],
+  "testPresets": [
+    {"name": "dev", "configurePreset": "dev", "output": {"outputOnFailure": true}},
+    {"name": "ci", "configurePreset": "ci", "output": {"outputOnFailure": true}},
+    {"name": "headless", "configurePreset": "headless", "output": {"outputOnFailure": true}}
+  ]
 }

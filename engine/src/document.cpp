@@ -1,4 +1,5 @@
 #include "pdfengine/document.h"
+#include "sfnt.h"
 #include "text_edit.h"
 #include <qpdf/QPDF.hh>
 #include <qpdf/QPDFExc.hh>
@@ -6,11 +7,16 @@
 #include <qpdf/QPDFPageObjectHelper.hh>
 #include <qpdf/QPDFWriter.hh>
 #include <algorithm>
+#include <iomanip>
 #include <numeric>
+#include <cstring>
+#include <fstream>
+#include <random>
+#include <locale>
+#include <sstream>
 
 namespace pdfengine {
 namespace {
-constexpr std::size_t historyBudget = 128 * 1024 * 1024;
 constexpr std::size_t maxPages = 10000;
 using Obj = QPDFObjectHandle;
 struct Store {
@@ -33,8 +39,8 @@ std::shared_ptr<const Bytes> serialize(QPDF& pdf) {
     writer.setPreserveEncryption(false);
     writer.write();
     auto buffer = writer.getBufferSharedPointer();
-    if (buffer->getSize() > 256u * 1024u * 1024u)
-        throw Error(ErrorCode::ResourceLimit, "This preview supports PDF snapshots up to 256 MiB.");
+    if (buffer->getSize() > maxDocumentBytes)
+        throw Error(ErrorCode::ResourceLimit, "This preview supports PDF snapshots up to 1 GiB.");
     return std::make_shared<const Bytes>(buffer->getBuffer(), buffer->getBuffer() + buffer->getSize());
 }
 std::vector<PageInfo> inspect(QPDF& pdf, const std::vector<PageId>& ids) {
@@ -79,6 +85,85 @@ Obj blank(QPDF& pdf) {
     page.replaceKey("/Contents", pdf.newStream(""));
     return pdf.makeIndirectObject(page);
 }
+constexpr double defaultImageDpi = 96, maxImagePageSide = 842;
+Obj imageStream(QPDF& pdf, const ImagePage& image, bool alpha) {
+    const auto& data = alpha ? image.alpha : image.data;
+    auto stream = pdf.newStream(std::string(data.begin(), data.end()));
+    auto dict = stream.getDict();
+    dict.replaceKey("/Type", Obj::newName("/XObject"));
+    dict.replaceKey("/Subtype", Obj::newName("/Image"));
+    dict.replaceKey("/Width", Obj::newInteger(image.width));
+    dict.replaceKey("/Height", Obj::newInteger(image.height));
+    dict.replaceKey("/ColorSpace", Obj::newName(alpha || image.components == 1 ? "/DeviceGray" : "/DeviceRGB"));
+    dict.replaceKey("/BitsPerComponent", Obj::newInteger(8));
+    if (image.jpeg && !alpha) dict.replaceKey("/Filter", Obj::newName("/DCTDecode"));
+    return stream;
+}
+Obj imagePage(QPDF& pdf, const ImagePage& image) {
+    const std::uint64_t pixels = static_cast<std::uint64_t>(image.width) * image.height;
+    if (image.width == 0 || image.height == 0 || image.width > 30000 || image.height > 30000 || pixels > 100'000'000)
+        throw Error(ErrorCode::ResourceLimit, "Images must be at most 30,000 pixels per side and 100 megapixels.");
+    if (image.components != 1 && image.components != 3) throw Error(ErrorCode::Unsupported, "Only gray and RGB images are supported.");
+    if (!image.jpeg && image.data.size() != pixels * static_cast<std::uint64_t>(image.components))
+        throw Error(ErrorCode::InvalidDocument, "The image pixel data has the wrong size.");
+    if (image.data.empty() || (!image.alpha.empty() && image.alpha.size() != pixels))
+        throw Error(ErrorCode::InvalidDocument, "The image data is incomplete.");
+    double dpi = image.dpi >= 1 && image.dpi <= 10000 ? image.dpi : defaultImageDpi;
+    double width = image.width * 72.0 / dpi, height = image.height * 72.0 / dpi;
+    if (double longest = std::max(width, height); longest > maxImagePageSide) { width *= maxImagePageSide / longest; height *= maxImagePageSide / longest; }
+    width = std::max(width, 1.0); height = std::max(height, 1.0);
+    auto picture = imageStream(pdf, image, false);
+    if (!image.alpha.empty()) picture.getDict().replaceKey("/SMask", pdf.makeIndirectObject(imageStream(pdf, image, true)));
+    std::ostringstream content; content.imbue(std::locale::classic()); content << std::fixed << std::setprecision(4);
+    content << "q " << width << " 0 0 " << height << " 0 0 cm /Im0 Do Q\n";
+    auto xobjects = Obj::newDictionary(); xobjects.replaceKey("/Im0", pdf.makeIndirectObject(picture));
+    auto resources = Obj::newDictionary(); resources.replaceKey("/XObject", xobjects);
+    auto page = Obj::newDictionary();
+    page.replaceKey("/Type", Obj::newName("/Page"));
+    page.replaceKey("/MediaBox", Obj::newArray(Obj::Rectangle(0, 0, width, height)));
+    page.replaceKey("/Resources", resources);
+    page.replaceKey("/Contents", pdf.newStream(content.str()));
+    return pdf.makeIndirectObject(page);
+}
+}
+ImagePage jpegImage(const Bytes& file, double dpi) {
+    auto bad = [] { return Error(ErrorCode::Unsupported, "This JPEG is not supported. Use an 8-bit gray or RGB JPEG."); };
+    if (file.size() < 4 || file[0] != 0xff || file[1] != 0xd8) throw Error(ErrorCode::InvalidDocument, "The file is not a valid JPEG image.");
+    std::size_t i = 2;
+    while (i + 4 <= file.size()) {
+        if (file[i] != 0xff) { ++i; continue; }
+        unsigned marker = file[i + 1];
+        if (marker == 0xff) { ++i; continue; }
+        if (marker == 0xd8 || marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
+        if (marker == 0xd9 || marker == 0xda) break;
+        std::size_t length = (static_cast<std::size_t>(file[i + 2]) << 8) | file[i + 3];
+        if (length < 2 || i + 2 + length > file.size()) break;
+        if (marker == 0xc0 || marker == 0xc1 || marker == 0xc2) {
+            if (length < 8) break;
+            int precision = file[i + 4], components = file[i + 9];
+            std::uint32_t height = (file[i + 5] << 8) | file[i + 6], width = (file[i + 7] << 8) | file[i + 8];
+            if (precision != 8 || (components != 1 && components != 3) || !width || !height) throw bad();
+            ImagePage image; image.width = width; image.height = height; image.components = components;
+            image.jpeg = true; image.data = file; image.dpi = dpi;
+            return image;
+        }
+        if ((marker >= 0xc3 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc)) throw bad();
+        i += 2 + length;
+    }
+    throw Error(ErrorCode::InvalidDocument, "The JPEG header could not be read.");
+}
+std::shared_ptr<Document> Document::createFromImage(const ImagePage& image) {
+    auto doc = std::shared_ptr<Document>(new Document);
+    QPDF pdf;
+    pdf.emptyPDF();
+    QPDFPageDocumentHelper(pdf).addPage(QPDFPageObjectHelper(imagePage(pdf, image)), false);
+    auto bytes = serialize(pdf);
+    Store checked(bytes);
+    auto metadata = inspect(checked.pdf, {doc->nextPage_++});
+    if (!pdf.getWarnings().empty() || !checked.pdf.getWarnings().empty())
+        throw Error(ErrorCode::InvalidDocument, "The image could not be converted to a valid PDF page.");
+    doc->current_ = {std::move(bytes), std::move(metadata), doc->nextIdentity_++};
+    return doc;
 }
 std::shared_ptr<Document> Document::create() {
     auto doc = std::shared_ptr<Document>(new Document);
@@ -114,19 +199,76 @@ void Document::checkRevision(RevisionId expected) const {
     if (expected != revision_) throw Error(ErrorCode::StaleRevision, "The document changed. Select the page again and retry.");
     if (!editable_) throw Error(ErrorCode::Unsupported, restriction_);
 }
+struct Document::SpillFile {
+    std::filesystem::path path;
+    ~SpillFile() { std::error_code ec; std::filesystem::remove(path, ec); }
+};
+Document::~Document() {
+    undo_.clear(); redo_.clear(); current_ = {};
+    if (!spillDirectory_.empty()) { std::error_code ec; std::filesystem::remove_all(spillDirectory_, ec); }
+}
+void Document::setHistoryLimits(const HistoryLimits& limits) { limits_ = limits; enforceHistoryBudget(); }
+bool Document::spill(State& state) {
+    if (!state.spill) {
+        try {
+            if (spillDirectory_.empty()) {
+                auto directory = std::filesystem::temp_directory_path() / ("folioforge-history-" + std::to_string(std::random_device{}()) + "-" + std::to_string(std::random_device{}()));
+                std::filesystem::create_directories(directory);
+                spillDirectory_ = directory;
+            }
+            auto file = std::make_shared<SpillFile>();
+            file->path = spillDirectory_ / (std::to_string(++spillCounter_) + ".pdf");
+            {
+                std::ofstream out(file->path, std::ios::binary);
+                out.write(reinterpret_cast<const char*>(state.bytes->data()), static_cast<std::streamsize>(state.bytes->size()));
+                out.flush();
+                if (!out) return false;
+            }
+            state.spill = std::move(file); state.spillSize = state.bytes->size();
+        } catch (const std::exception&) { return false; }
+    }
+    state.bytes.reset();
+    return true;
+}
+void Document::materialize(State& state) const {
+    if (state.bytes) return;
+    try { state.bytes = std::make_shared<const Bytes>(readFile(state.spill->path)); }
+    catch (const std::exception&) { throw Error(ErrorCode::InvalidDocument, "An earlier document state could not be restored from disk."); }
+}
+void Document::enforceHistoryBudget() {
+    auto prune = [this](std::vector<State>& list, std::size_t index) { list.erase(list.begin() + static_cast<std::ptrdiff_t>(index)); historyPruned_ = true; };
+    while (undo_.size() > limits_.entries) prune(undo_, 0);
+    auto memory = [this] {
+        std::uint64_t total = 0;
+        for (const auto* list : {&undo_, &redo_}) for (const auto& item : *list) if (item.bytes) total += item.bytes->size();
+        return total;
+    };
+    while (memory() > limits_.memoryBytes) {
+        // Oldest undo states are farthest from the user; redo states are farthest at the front.
+        State* candidate = nullptr; std::vector<State>* owner = nullptr; std::size_t index = 0;
+        for (std::size_t i = 0; i < undo_.size() && !candidate; ++i) if (undo_[i].bytes) { candidate = &undo_[i]; owner = &undo_; index = i; }
+        for (std::size_t i = 0; i < redo_.size() && !candidate; ++i) if (redo_[i].bytes) { candidate = &redo_[i]; owner = &redo_; index = i; }
+        if (!candidate) break;
+        if (!spill(*candidate)) prune(*owner, index); // Disk unavailable: keep only what fits in memory.
+    }
+    auto disk = [this] {
+        std::uint64_t total = 0;
+        for (const auto* list : {&undo_, &redo_}) for (const auto& item : *list) if (item.spill) total += item.spillSize;
+        return total;
+    };
+    while (disk() > limits_.diskBytes) {
+        if (!undo_.empty()) prune(undo_, 0);
+        else if (!redo_.empty()) prune(redo_, 0);
+        else break;
+    }
+}
 void Document::commit(State state) {
     // Prepare allocations before publishing anything. A failed candidate never touches the session.
     undo_.push_back(current_);
     current_ = std::move(state);
     redo_.clear();
     ++revision_;
-    std::size_t total = current_.bytes->size();
-    for (const auto& item : undo_) total += item.bytes->size();
-    while (!undo_.empty() && (total > historyBudget || undo_.size() > 100)) {
-        total -= undo_.front().bytes->size();
-        undo_.erase(undo_.begin());
-        historyPruned_ = true;
-    }
+    enforceHistoryBudget();
 }
 void Document::execute(const Command& command) {
     checkRevision(command.expectedRevision);
@@ -175,12 +317,16 @@ void Document::execute(const Command& command) {
 void Document::undo(RevisionId expected) {
     checkRevision(expected);
     if (undo_.empty()) return;
-    redo_.push_back(current_); current_ = std::move(undo_.back()); undo_.pop_back(); ++revision_;
+    auto target = undo_.back(); materialize(target);
+    redo_.push_back(current_); current_ = std::move(target); undo_.pop_back(); ++revision_;
+    enforceHistoryBudget();
 }
 void Document::redo(RevisionId expected) {
     checkRevision(expected);
     if (redo_.empty()) return;
-    undo_.push_back(current_); current_ = std::move(redo_.back()); redo_.pop_back(); ++revision_;
+    auto target = redo_.back(); materialize(target);
+    undo_.push_back(current_); current_ = std::move(target); redo_.pop_back(); ++revision_;
+    enforceHistoryBudget();
 }
 void Document::insertDocument(const std::filesystem::path& path, PageId after, RevisionId expected) {
     checkRevision(expected);
@@ -208,6 +354,25 @@ void Document::insertDocument(const std::filesystem::path& path, PageId after, R
     commit({std::move(bytes), std::move(metadata), nextIdentity_});
     ++nextIdentity_; nextPage_ = next;
 }
+void Document::insertImage(const ImagePage& image, PageId after, RevisionId expected) {
+    checkRevision(expected);
+    auto ids = idsOf(current_.pages);
+    auto found = std::find(ids.begin(), ids.end(), after);
+    if (found == ids.end()) throw Error(ErrorCode::InvalidSelection, "Select a destination page.");
+    if (ids.size() >= maxPages) throw Error(ErrorCode::ResourceLimit, "The 10,000-page preview limit has been reached.");
+    auto index = static_cast<std::size_t>(found - ids.begin());
+    Store store(current_.bytes);
+    QPDFPageDocumentHelper helper(store.pdf);
+    helper.addPageAt(QPDFPageObjectHelper(imagePage(store.pdf, image)), false, helper.getAllPages()[index]);
+    ids.insert(ids.begin() + index + 1, nextPage_);
+    auto bytes = serialize(store.pdf);
+    Store checked(bytes);
+    auto metadata = inspect(checked.pdf, ids);
+    if (!store.pdf.getWarnings().empty() || !checked.pdf.getWarnings().empty())
+        throw Error(ErrorCode::InvalidDocument, "The image import produced PDF warnings and was rolled back.");
+    commit({std::move(bytes), std::move(metadata), nextIdentity_});
+    ++nextIdentity_; ++nextPage_;
+}
 void Document::save(const std::filesystem::path& path, bool overwrite) {
     if (!editable_) throw Error(ErrorCode::Unsupported, restriction_);
     auto target = std::filesystem::absolute(path).lexically_normal();
@@ -231,6 +396,11 @@ TextInventory Document::textRuns(PageId id) const {
     if (store.pdf.getWarnings().empty()) for (auto& item : source.runs) result.runs.push_back(std::move(item.run));
     return result;
 }
+void Document::setFallbackFonts(const std::vector<std::filesystem::path>& paths) {
+    auto source = std::make_shared<font::FontSource>();
+    try { source->setFonts(paths); } catch (const std::exception& error) { throw Error(ErrorCode::Unsupported, error.what()); }
+    fonts_ = std::move(source);
+}
 void Document::replaceText(const ReplaceText& request) {
     checkRevision(request.expectedRevision);
     auto ids = idsOf(current_.pages);
@@ -241,8 +411,9 @@ void Document::replaceText(const ReplaceText& request) {
     auto inventory = textedit::inspect(page, request.page, revision_);
     auto run = std::find_if(inventory.runs.begin(), inventory.runs.end(), [&](const auto& item) { return item.run.id == request.run; });
     if (run == inventory.runs.end()) throw Error(ErrorCode::Unsupported, "This text run is not supported or its source mapping is stale.");
-    auto updated = textedit::replacement(*run, request.text);
     if (request.text == run->run.text) return;
+    if (!fonts_) fonts_ = std::make_shared<font::FontSource>();
+    auto updated = textedit::replacement(store.pdf, page, *run, request.text, fonts_.get());
     if (run->offset > inventory.content.size() || run->length > inventory.content.size() - run->offset)
         throw Error(ErrorCode::InvalidDocument, "The text source span could not be validated.");
     inventory.content.replace(run->offset, run->length, updated);
@@ -252,8 +423,11 @@ void Document::replaceText(const ReplaceText& request) {
     Store checked(bytes);
     auto metadata = inspect(checked.pdf, ids);
     auto checkedText = textedit::inspect(QPDFPageDocumentHelper(checked.pdf).getAllPages()[selected - ids.begin()], request.page, revision_ + 1);
-    auto rewritten = std::find_if(checkedText.runs.begin(), checkedText.runs.end(), [&](const auto& item) { return item.run.id == request.run && item.run.text == request.text; });
-    if ((!request.text.empty() && rewritten == checkedText.runs.end()) || !store.pdf.getWarnings().empty() || !checked.pdf.getWarnings().empty())
+    // A replacement may span several runs when fallback fonts are used; rejoin them before comparing.
+    std::string rewritten;
+    for (const auto& item : checkedText.runs)
+        if (item.run.id >= run->offset && item.run.id < run->offset + updated.size()) rewritten += item.run.text;
+    if (rewritten != request.text || !store.pdf.getWarnings().empty() || !checked.pdf.getWarnings().empty())
         throw Error(ErrorCode::InvalidDocument, "Text edit validation failed. The original document was retained.");
     commit({std::move(bytes), std::move(metadata), nextIdentity_}); ++nextIdentity_;
 }

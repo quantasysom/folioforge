@@ -1,5 +1,6 @@
 #pragma once
 #include "pdfengine/document.h"
+#include "pdfengine/render_service.h"
 #include <QMainWindow>
 #include <QImage>
 #include <QThreadPool>
@@ -32,7 +33,7 @@ public:
 };
 class Window : public QMainWindow {
 public:
-    explicit Window(bool smoke = false);
+    explicit Window(std::shared_ptr<pdfengine::RenderService> renderer, bool smoke = false);
     void openPath(const QString& path);
     bool busy() const;
     bool smokeReady() const;
@@ -44,15 +45,17 @@ protected:
     void dropEvent(QDropEvent*) override;
 private:
     QTabWidget* tabs_{};
+    std::shared_ptr<pdfengine::RenderService> renderer_;
     QThreadPool worker_;
     QComboBox* zoom_{};
-    QAction *save_{}, *saveAs_{}, *undo_{}, *redo_{}, *delete_{}, *insert_{}, *merge_{}, *duplicate_{},
+    QAction *save_{}, *saveAs_{}, *undo_{}, *redo_{}, *delete_{}, *insert_{}, *merge_{}, *insertImage_{}, *duplicate_{},
             *left_{}, *right_{}, *earlier_{}, *later_{}, *exportImage_{}, *exportText_{}, *find_{}, *editText_{}, *applyText_{}, *cancelText_{};
     bool smoke_{}, hadError_{};
     int smokeStep_{};
     DocumentPane* active() const;
     DocumentPane* addPane(const QString&);
     void newDocument();
+    void openImages(const QStringList&);
     void load(DocumentPane*, const QString&, const QString& password = {});
     void run(DocumentPane*, const QString&, std::function<void()>, std::function<void()> done = {}, std::function<void()> failed = {});
     void refresh(DocumentPane*);

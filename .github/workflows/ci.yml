@@ -1,0 +1,64 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: Windows x64, os: windows-2022, qt_arch: win64_msvc2022_64, triplet: x64-windows-release}
+          - {name: Linux x64, os: ubuntu-24.04, qt_arch: linux_gcc_64, triplet: x64-linux-release}
+          - {name: macOS arm64, os: macos-14, qt_arch: clang_64, triplet: arm64-osx-release}
+    env:
+      VCPKG_DEFAULT_TRIPLET: ${{ matrix.triplet }}
+      VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: 6.8.*
+          arch: ${{ matrix.qt_arch }}
+          cache: true
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build fonts-dejavu-core fonts-liberation libgl1-mesa-dev libxkbcommon-dev
+      - name: macOS packages
+        if: runner.os == 'macOS'
+        run: brew install ninja
+      - name: Windows MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Bootstrap vcpkg
+        shell: bash
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
+          "$VCPKG_ROOT/bootstrap-vcpkg.${{ runner.os == 'Windows' && 'bat' || 'sh' }}" -disableMetrics
+      - name: Fetch PDFium
+        run: python scripts/fetch-pdfium.py
+      - name: Configure
+        shell: bash
+        env:
+          PDFIUM_ROOT: ${{ github.workspace }}/third_party/pdfium
+        run: cmake --preset ci -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR;$PDFIUM_ROOT"
+      - name: Build
+        run: cmake --build --preset ci
+      - name: Test
+        run: ctest --preset ci
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-output-${{ matrix.os }}
+          path: |
+            build/ci/*.png
+            build/ci/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore

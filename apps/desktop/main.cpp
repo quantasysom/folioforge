@@ -6,6 +6,7 @@
 #include <QElapsedTimer>
 #include <QDebug>
 #include <QFontDatabase>
+#include <QMessageBox>
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QCoreApplication::setOrganizationName("FolioForge"); QCoreApplication::setApplicationName("FolioForge");
@@ -17,7 +18,13 @@ int main(int argc, char** argv) {
         if (font >= 0) app.setFont(QFont(QFontDatabase::applicationFontFamilies(font).first(), 10));
 #endif
     }
-    Window window(smoke); window.show();
+    std::shared_ptr<pdfengine::RenderService> renderer;
+    try { renderer = pdfengine::RenderService::forApplication(std::filesystem::path(app.applicationDirPath().toStdU16String())); }
+    catch (const std::exception& error) {
+        if (smoke) qCritical() << error.what(); else QMessageBox::critical(nullptr, "FolioForge", error.what());
+        return 1;
+    }
+    Window window(renderer, smoke); window.show();
     if (smoke) {
         auto path = QDir::current().absoluteFilePath("smoke-input.pdf");
         if (!QFileInfo::exists(path)) { qCritical() << "Run engine-tests to generate the smoke-test fixture first."; return 1; }
