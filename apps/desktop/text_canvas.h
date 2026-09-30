@@ -6,6 +6,9 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QTimer>
+#include <QPolygonF>
+#include <algorithm>
+#include <vector>
 #include <functional>
 
 class InlineEditor : public QLineEdit {
@@ -29,11 +32,44 @@ class TextCanvas : public QLabel {
 public:
     explicit TextCanvas(const QString& label = {}) : QLabel(label) { setFocusPolicy(Qt::StrongFocus); setMouseTracking(true); }
     std::vector<pdfengine::TextRun> runs;
-    double scale{1}, pageHeight{};
+    double scale{1}, pageHeight{}, pageWidth{};
+    int rotation{};
+    // Annotation tool: None does nothing, Area drags a rectangle, Pen draws freehand, Point places at a click, Select picks an annotation.
+    enum class Tool { None, Area, Pen, Point, Select } tool{Tool::None};
+    std::vector<pdfengine::Annotation> annotations;
+    int selectedAnnotation{-1};
+    std::function<void(QPointF, QPointF)> areaDrawn;
+    std::function<void(std::vector<std::vector<QPointF>>)> strokeDrawn;
+    std::function<void(QPointF)> pointPicked;
+    std::function<void(int)> annotationSelected;
+    // Page space (points, y up, unrotated page) <-> canvas pixels.
+    QPointF toPdf(const QPointF& view) const {
+        const double u = view.x() / scale, v = view.y() / scale;
+        switch (rotation) {
+        case 90: return {v, u};
+        case 180: return {pageWidth - u, v};
+        case 270: return {pageWidth - v, pageHeight - u};
+        default: return {u, pageHeight - v};
+        }
+    }
+    QPointF toView(const QPointF& pdf) const {
+        switch (rotation) {
+        case 90: return {pdf.y() * scale, pdf.x() * scale};
+        case 180: return {(pageWidth - pdf.x()) * scale, pdf.y() * scale};
+        case 270: return {(pageHeight - pdf.y()) * scale, (pageWidth - pdf.x()) * scale};
+        default: return {pdf.x() * scale, (pageHeight - pdf.y()) * scale};
+        }
+    }
+    QRectF annotationBox(const pdfengine::Annotation& a) const {
+        return QRectF(toView({a.x0, a.y0}), toView({a.x1, a.y1})).normalized().adjusted(-2, -2, 2, 2);
+    }
     bool editMode{};
     int selected{}, hovered{-1};
     QPointF pressPoint{-1, -1};
     InlineEditor* editor{};
+    bool dragging{};
+    QPointF dragStart, dragEnd;
+    QList<QPointF> currentStroke;
     std::function<void(int)> editRequested;
     bool editing() const { return editor && editor->isVisible(); }
     QRectF box(int index) const {
@@ -52,11 +88,29 @@ public:
 protected:
     void paintEvent(QPaintEvent* event) override {
         QLabel::paintEvent(event);
+        if (tool != Tool::None) {
+            QPainter overlay(this); overlay.setRenderHint(QPainter::Antialiasing);
+            if (selectedAnnotation >= 0 && selectedAnnotation < static_cast<int>(annotations.size())) {
+                overlay.setPen(QPen(QColor("#1769E8"), 1.5, Qt::DashLine)); overlay.setBrush(Qt::NoBrush);
+                overlay.drawRect(annotationBox(annotations[selectedAnnotation]));
+            }
+            if (dragging && tool == Tool::Area) {
+                overlay.setPen(QPen(QColor("#1769E8"), 1, Qt::DashLine)); overlay.setBrush(QColor(23, 105, 232, 30));
+                overlay.drawRect(QRectF(dragStart, dragEnd).normalized());
+            } else if (dragging && tool == Tool::Pen) {
+                overlay.setPen(QPen(QColor("#1769E8"), 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin)); overlay.drawPolyline(QPolygonF(currentStroke));
+            }
+        }
         if (!editMode || editing() || hovered < 0 || hovered >= static_cast<int>(runs.size())) return;
         QPainter painter(this); painter.setRenderHint(QPainter::Antialiasing);
         painter.setPen(QPen(QColor("#1769E8"), 1)); painter.setBrush(QColor(23, 105, 232, 28)); painter.drawRect(box(hovered));
     }
     void mouseMoveEvent(QMouseEvent* event) override {
+        if (tool != Tool::None && dragging) {
+            dragEnd = event->position();
+            if (tool == Tool::Pen) currentStroke.append(event->position());
+            update(); return;
+        }
         if (editMode && !editing()) {
             int match = runAt(event->position());
             if (match != hovered) { hovered = match; update(); }
@@ -66,11 +120,35 @@ protected:
     }
     void leaveEvent(QEvent* event) override { hovered = -1; unsetCursor(); update(); QLabel::leaveEvent(event); }
     void mousePressEvent(QMouseEvent* event) override {
+        if (tool != Tool::None && !editMode && event->button() == Qt::LeftButton) {
+            if (tool == Tool::Point) { if (pointPicked) pointPicked(toPdf(event->position())); return; }
+            if (tool == Tool::Select) {
+                int match = -1; double area = 0;
+                for (int i = 0; i < static_cast<int>(annotations.size()); ++i) {
+                    auto rect = annotationBox(annotations[i]);
+                    if (rect.contains(event->position()) && (match < 0 || rect.width() * rect.height() < area)) { match = i; area = rect.width() * rect.height(); }
+                }
+                selectedAnnotation = match; update(); if (annotationSelected) annotationSelected(match); return;
+            }
+            dragging = true; dragStart = dragEnd = event->position(); currentStroke = {event->position()}; update(); return;
+        }
         if (editMode && !editing()) {
             int match = runAt(event->position());
             if (match >= 0) { selected = match; pressPoint = event->position(); update(); if (editRequested) editRequested(match); return; }
         }
         QLabel::mousePressEvent(event);
+    }
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        if (dragging && event->button() == Qt::LeftButton) {
+            dragging = false; dragEnd = event->position(); update();
+            if (tool == Tool::Area && areaDrawn) areaDrawn(toPdf(dragStart), toPdf(dragEnd));
+            else if (tool == Tool::Pen && strokeDrawn) {
+                std::vector<QPointF> stroke; for (const auto& point : currentStroke) stroke.push_back(toPdf(point));
+                strokeDrawn({std::move(stroke)});
+            }
+            currentStroke.clear(); return;
+        }
+        QLabel::mouseReleaseEvent(event);
     }
     void keyPressEvent(QKeyEvent* event) override {
         if (editMode && !editing() && !runs.empty()) {

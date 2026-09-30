@@ -2,8 +2,11 @@
 #include "pdfengine/document.h"
 #include "pdfengine/render_service.h"
 #include <QMainWindow>
+#include <QColor>
 #include <QImage>
+#include <optional>
 #include <QThreadPool>
+#include <array>
 #include <functional>
 class QTabWidget;
 class QListWidget;
@@ -50,6 +53,10 @@ private:
     QComboBox* zoom_{};
     QAction *save_{}, *saveAs_{}, *undo_{}, *redo_{}, *delete_{}, *insert_{}, *merge_{}, *insertImage_{}, *duplicate_{},
             *left_{}, *right_{}, *earlier_{}, *later_{}, *exportImage_{}, *exportText_{}, *find_{}, *editText_{}, *applyText_{}, *cancelText_{};
+    std::vector<QAction*> tools_;
+    QAction *deleteAnnotation_{}, *annotationColor_{};
+    pdfengine::AnnotationKind toolKind_{pdfengine::AnnotationKind::Highlight};
+    std::optional<QColor> customColor_;
     bool smoke_{}, hadError_{};
     int smokeStep_{};
     DocumentPane* active() const;
@@ -64,6 +71,10 @@ private:
     void command(pdfengine::CommandKind);
     void save(DocumentPane*, bool saveAs, std::function<void()> done = {});
     void closeTab(int);
+    void selectTool(DocumentPane*, QAction*);
+    std::array<double, 3> annotationRgb() const;
+    void placeAnnotation(DocumentPane*, pdfengine::AddAnnotation);
+    void removeSelectedAnnotation(DocumentPane*);
     void search(DocumentPane*);
     void exportImage();
     void exportText();

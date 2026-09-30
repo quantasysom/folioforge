@@ -44,7 +44,7 @@ platform validation limits. Outputs go to `dist/<OS>` with SHA-256 checksums.
 | Export | Current page to PNG at 144 DPI; whole-document text to UTF-8 |
 | CLI | New, inspect, text, rotate, merge, JPEG-to-PDF (`image`); output collision protection |
 
-PDFs with encryption, parser repairs, annotations, forms, signatures, navigation trees, tagged structures, layers, or selected document actions are conservatively read-only. The UI explains the restriction. Encryption passwords are not saved. No PDF scripting or form-action API is called.
+Annotations (highlight, underline, strike-out, rectangle, ellipse, pen, sticky note, text box) can be added, selected and removed from the Annotate menu; each is written with a normal appearance stream, so other viewers show it. Existing passive markup annotations are preserved untouched (only annotations created by FolioForge can be removed). Text-box annotations support printable ASCII. PDFs with encryption, parser repairs, links, forms, signatures, navigation trees, tagged structures, layers, or selected document actions are conservatively read-only. The UI explains the restriction. Encryption passwords are not saved. No PDF scripting or form-action API is called.
 
 ```powershell
 ./build/gui/pdfeditor-cli.exe new output.pdf
@@ -76,7 +76,7 @@ See [implementation status](docs/implementation-status.md), [ownership ADR](docs
 
 ## Limits of this preview
 
-Arbitrary text/paragraph editing, new text/images/shapes, annotations, forms, signing, redaction, OCR, printing, outline navigation, page-range extraction/splitting, recovery, a thumbnail organization grid, and cancellable jobs are not implemented. Rendering uses one page at a time; thumbnails are populated when pages are visited. Search lists matching pages and does not highlight glyphs on the canvas.
+Arbitrary text/paragraph editing, new page text/images, annotation editing (move/resize/recolor), forms, signing, redaction, OCR, printing, outline navigation, page-range extraction/splitting, recovery, a thumbnail organization grid, and cancellable jobs are not implemented. Rendering uses one page at a time; thumbnails are populated when pages are visited. Search lists matching pages and does not highlight glyphs on the canvas.
 
 The parser and renderer currently run in-process. The supplied PDFium binary has V8/XFA compiled in; hardened builds and isolated workers remain release prerequisites. Input/snapshots are limited to 256 MiB, documents to 10,000 pages, and rasters to 32 megapixels. These bounds do not provide full protection against malicious decoded streams or expensive PDFs. Large-file and cross-platform qualification is outstanding.
 

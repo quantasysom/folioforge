@@ -71,7 +71,7 @@ QImage imageOf(const Bitmap& bitmap) {
     return QImage(bitmap.bgra.data(), bitmap.width, bitmap.height, bitmap.stride, QImage::Format_ARGB32).copy();
 }
 struct JobResult { QString error; bool password{}; };
-struct PageRender { QImage image; QString text; TextInventory inventory; };
+struct PageRender { QImage image; QString text; TextInventory inventory; std::vector<Annotation> annotations; };
 QString exportPath(QWidget* parent, const QString& title, const QString& suffix, const QString& filter) {
     auto path = QFileDialog::getSaveFileName(parent, title, "export." + suffix, filter, nullptr, QFileDialog::DontConfirmOverwrite);
     if (path.isEmpty()) return {};
@@ -106,7 +106,7 @@ DocumentPane::DocumentPane(QWidget* parent) : QWidget(parent) {
     text = new QPlainTextEdit; text->setReadOnly(true); text->setPlaceholderText("Extracted page text appears here."); text->setAccessibleName("Accessible extracted page text");
     propertiesLayout->addWidget(title); propertiesLayout->addWidget(properties); propertiesLayout->addSpacing(16);
     propertiesLayout->addWidget(new QLabel("Page text")); propertiesLayout->addWidget(text, 1);
-    auto scope = new QLabel("Preview · Local files only\n\nClick-to-type editing supports standard Helvetica/Courier ASCII text; later text on the line reflows. Custom fonts, forms, signing, and redaction are not yet available.");
+    auto scope = new QLabel("Preview · Local files only\n\nClick-to-type text editing (including embedded fonts and non-Latin text) and Annotate tools (highlight, underline, strike-out, shapes, pen, notes, text boxes) are available. Forms, signing, and redaction are not yet available.");
     scope->setWordWrap(true); scope->setStyleSheet("color:#596579;font-size:11px;"); propertiesLayout->addWidget(scope);
     split->addWidget(inspector); split->setStretchFactor(1, 1); split->setSizes({220, 850, 260});
 }
@@ -149,6 +149,7 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
     editText_ = action(edit, "Edit text", QKeySequence("Ctrl+E"), [this] {
         auto p = active(); if (!p || p->busy || p->canvas->editing()) return;
         p->canvas->editMode = editText_->isChecked(); p->canvas->update();
+        if (p->canvas->editMode) { p->canvas->tool = TextCanvas::Tool::None; for (auto a : tools_) a->setChecked(false); }
         if (p->canvas->editMode) {
             p->canvas->setFocus();
             statusBar()->showMessage(p->textInventory.runs.empty() ? QString::fromStdString(p->textInventory.explanation) :
@@ -162,6 +163,33 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
     cancelText_ = action(edit, "Cancel edit", {}, [this] { auto p = active(); if (p && !p->busy) cancelTextEdit(p); });
     toolbar->addAction(applyText_); toolbar->addAction(cancelText_);
     find_ = action(edit, "&Find…", QKeySequence::Find, [this] { if (auto p = active()) { auto nav = qobject_cast<QTabWidget*>(p->query->parentWidget()->parentWidget()->parentWidget()); if (nav) nav->setCurrentIndex(1); p->query->setFocus(); p->query->selectAll(); } });
+    auto annotate = menuBar()->addMenu("&Annotate");
+    auto annotationBar = addToolBar("Annotate"); annotationBar->setMovable(false); annotationBar->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    auto group = new QActionGroup(this); group->setExclusive(true);
+    struct ToolSpec { const char* label; AnnotationKind kind; TextCanvas::Tool tool; const char* tip; };
+    const ToolSpec specs[] = {
+        {"Highlight", AnnotationKind::Highlight, TextCanvas::Tool::Area, "Drag over text to highlight it"},
+        {"Underline", AnnotationKind::Underline, TextCanvas::Tool::Area, "Drag over text to underline it"},
+        {"Strike-out", AnnotationKind::StrikeOut, TextCanvas::Tool::Area, "Drag over text to strike it out"},
+        {"Rectangle", AnnotationKind::Rectangle, TextCanvas::Tool::Area, "Drag to draw a rectangle"},
+        {"Ellipse", AnnotationKind::Ellipse, TextCanvas::Tool::Area, "Drag to draw an ellipse"},
+        {"Pen", AnnotationKind::Ink, TextCanvas::Tool::Pen, "Draw freehand"},
+        {"Note", AnnotationKind::Note, TextCanvas::Tool::Point, "Click to place a sticky note"},
+        {"Text box", AnnotationKind::FreeText, TextCanvas::Tool::Area, "Drag a box, then type the text to place"},
+        {"Select", AnnotationKind::Other, TextCanvas::Tool::Select, "Click an annotation to select it"}};
+    for (const auto& spec : specs) {
+        auto a = new QAction(spec.label, this); a->setCheckable(true); a->setToolTip(spec.tip); a->setStatusTip(spec.tip);
+        a->setData(QVariant::fromValue<int>(static_cast<int>(spec.tool) * 100 + static_cast<int>(spec.kind)));
+        group->addAction(a); annotate->addAction(a); annotationBar->addAction(a); tools_.push_back(a);
+        connect(a, &QAction::triggered, this, [this, a] { selectTool(active(), a); });
+    }
+    annotate->addSeparator();
+    annotationColor_ = action(annotate, "Color…", {}, [this] {
+        auto chosen = QColorDialog::getColor(customColor_.value_or(QColor(255, 224, 0)), this, "Annotation color");
+        if (chosen.isValid()) customColor_ = chosen;
+    });
+    deleteAnnotation_ = action(annotate, "Delete selected annotation", {}, [this] { removeSelectedAnnotation(active()); });
+    annotationBar->addSeparator(); annotationBar->addAction(annotationColor_); annotationBar->addAction(deleteAnnotation_);
     auto organize = addToolBar("Organize pages"); organize->setMovable(false); addToolBarBreak(); addToolBar(Qt::TopToolBarArea, organize);
     insert_ = action(page, "Insert blank", {}, [this] { command(CommandKind::InsertBlank); });
     merge_ = action(page, "Insert PDF…", {}, [this] {
@@ -326,6 +354,29 @@ int Window::advanceSmokeTest() {
     case 17:
         if (!p->info.dirty || p->info.pages.size() != 1 || std::abs(p->info.pages[0].width - 48) > 0.01 || std::abs(p->info.pages[0].height - 24) > 0.01) return -1;
         if (tabs_->tabText(tabs_->currentIndex()) != "smoke-image.pdf *") return -1;
+        // Annotation tools: drag a highlight over the page, then undo, redo, select and delete it.
+        tools_[0]->trigger();
+        if (p->canvas->tool != TextCanvas::Tool::Area || toolKind_ != AnnotationKind::Highlight) return -1;
+        p->canvas->areaDrawn(p->canvas->toPdf({6, 6}), p->canvas->toPdf({40, 18}));
+        break;
+    case 18:
+        if (p->canvas->annotations.size() != 1 || p->canvas->annotations[0].kind != AnnotationKind::Highlight) return -1;
+        undo_->trigger(); break;
+    case 19:
+        if (!p->canvas->annotations.empty()) return -1;
+        redo_->trigger(); break;
+    case 20:
+        if (p->canvas->annotations.size() != 1) return -1;
+        tools_[8]->trigger();
+        {
+            auto point = p->canvas->annotationBox(p->canvas->annotations[0]).center();
+            QMouseEvent click(QEvent::MouseButtonPress, point, point, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(p->canvas, &click);
+        }
+        if (p->canvas->selectedAnnotation != 0 || !deleteAnnotation_->isEnabled()) return -1;
+        deleteAnnotation_->trigger(); break;
+    case 21:
+        if (!p->canvas->annotations.empty()) return -1;
         return 1;
     default:
         return 1;
@@ -336,11 +387,76 @@ DocumentPane* Window::addPane(const QString& title) {
     auto p = new DocumentPane; tabs_->setCurrentIndex(tabs_->addTab(p, title));
     connect(p->pages, &QListWidget::currentRowChanged, this, [this, p](int row) { if (row >= 0 && !p->busy && !p->canvas->editing()) { p->currentPage = row; render(p); } });
     p->canvas->editRequested = [this, p](int index) { beginTextEdit(p, index); };
+    p->canvas->areaDrawn = [this, p](QPointF a, QPointF b) {
+        if (p->busy) return;
+        AddAnnotation request; request.kind = toolKind_; request.x0 = a.x(); request.y0 = a.y(); request.x1 = b.x(); request.y1 = b.y();
+        if (toolKind_ == AnnotationKind::FreeText) {
+            if (smoke_) request.contents = "Smoke text";
+            else {
+                bool ok = false; auto text = QInputDialog::getMultiLineText(this, "Text box", "Text to place (plain ASCII):", {}, &ok);
+                if (!ok || text.trimmed().isEmpty()) return;
+                request.contents = text.toStdString();
+            }
+        }
+        placeAnnotation(p, request);
+    };
+    p->canvas->strokeDrawn = [this, p](std::vector<std::vector<QPointF>> strokes) {
+        AddAnnotation request; request.kind = AnnotationKind::Ink; request.lineWidth = 2.5;
+        for (const auto& stroke : strokes) { request.strokes.emplace_back(); for (const auto& q : stroke) request.strokes.back().push_back({q.x(), q.y()}); }
+        placeAnnotation(p, request);
+    };
+    p->canvas->pointPicked = [this, p](QPointF at) {
+        if (p->busy) return;
+        AddAnnotation request; request.kind = AnnotationKind::Note; request.x0 = at.x(); request.y0 = at.y();
+        if (smoke_) request.contents = "Smoke note";
+        else {
+            bool ok = false; auto text = QInputDialog::getMultiLineText(this, "Note", "Note text:", {}, &ok);
+            if (!ok) return;
+            request.contents = text.toStdString();
+        }
+        placeAnnotation(p, request);
+    };
+    p->canvas->annotationSelected = [this](int) { updateActions(); };
+    for (auto key : {QKeySequence(Qt::Key_Delete), QKeySequence(Qt::Key_Backspace)}) {
+        auto removal = new QShortcut(key, p->canvas); removal->setContext(Qt::WidgetShortcut);
+        connect(removal, &QShortcut::activated, this, [this, p] { if (p->canvas->tool == TextCanvas::Tool::Select) removeSelectedAnnotation(p); });
+    }
     connect(p->query, &QLineEdit::returnPressed, this, [this, p] { search(p); });
     connect(p->matches, &QListWidget::itemActivated, this, [p](QListWidgetItem* item) { if (!p->busy) p->pages->setCurrentRow(item->data(Qt::UserRole).toInt()); });
     auto deletion = new QShortcut(QKeySequence::Delete, p->pages); deletion->setContext(Qt::WidgetShortcut);
     connect(deletion, &QShortcut::activated, this, [this, p] { if (active() == p && delete_->isEnabled()) command(CommandKind::Delete); });
     return p;
+}
+std::array<double, 3> Window::annotationRgb() const {
+    if (customColor_) return {customColor_->redF(), customColor_->greenF(), customColor_->blueF()};
+    switch (toolKind_) {
+    case AnnotationKind::Highlight: case AnnotationKind::Note: return {1, 0.9, 0.1};
+    case AnnotationKind::FreeText: return {0, 0, 0};
+    default: return {0.85, 0.1, 0.1};
+    }
+}
+void Window::selectTool(DocumentPane* p, QAction* action) {
+    if (!p) return;
+    const int code = action->data().toInt();
+    p->canvas->tool = static_cast<TextCanvas::Tool>(code / 100); toolKind_ = static_cast<AnnotationKind>(code % 100);
+    if (p->canvas->editing()) cancelTextEdit(p);
+    p->canvas->editMode = false; p->canvas->selectedAnnotation = -1; p->canvas->update();
+    p->canvas->setCursor(p->canvas->tool == TextCanvas::Tool::Select ? Qt::ArrowCursor : Qt::CrossCursor);
+    statusBar()->showMessage(action->toolTip()); updateActions();
+}
+void Window::placeAnnotation(DocumentPane* p, AddAnnotation request) {
+    if (!p || p->busy || !p->document || !p->info.editable) return;
+    request.page = p->info.pages[p->currentPage].id; request.expectedRevision = p->info.revision; request.color = annotationRgb();
+    run(p, "Adding annotation", [p, request] { p->document->addAnnotation(request); }, [this, p] { render(p); });
+}
+void Window::removeSelectedAnnotation(DocumentPane* p) {
+    if (!p || p->busy || !p->document || !p->info.editable) return;
+    const int selected = p->canvas->selectedAnnotation;
+    if (selected < 0 || selected >= static_cast<int>(p->canvas->annotations.size())) return;
+    const auto target = p->canvas->annotations[selected];
+    if (!target.removable) { statusBar()->showMessage("This annotation came from another program and is preserved unchanged."); return; }
+    auto id = p->info.pages[p->currentPage].id; auto revision = p->info.revision;
+    run(p, "Removing annotation", [p, id, target, revision] { p->document->removeAnnotation(id, target.index, revision); }, [this, p] { render(p); });
 }
 void Window::newDocument() { auto p = addPane("Untitled.pdf"); run(p, "Creating PDF", [p] { p->document = Document::create(); }, [this, p] { render(p); }); }
 void Window::openImages(const QStringList& paths) {
@@ -420,17 +536,20 @@ void Window::render(DocumentPane* p, std::function<void()> done) {
     auto result = std::make_shared<PageRender>();
     int page = p->currentPage; double scale = p->scale; double dpr = devicePixelRatioF(); auto snap = p->document->snapshot();
     // Never show the previous page as if it belonged to a newly selected revision.
-    p->canvas->runs.clear(); p->canvas->clear(); p->canvas->setText("Rendering page…"); p->text->clear(); p->image = {};
+    p->canvas->runs.clear(); p->canvas->annotations.clear(); p->canvas->selectedAnnotation = -1; p->canvas->clear(); p->canvas->setText("Rendering page…"); p->text->clear(); p->image = {};
     run(p, "Rendering page", [p, snap, page, scale, dpr, result, renderer = renderer_] {
         result->image = imageOf(renderer->render(snap, page, scale * dpr)); result->image.setDevicePixelRatio(dpr);
         try { result->text = QString::fromStdU16String(renderer->text(snap, page)); }
         catch (const std::exception&) { result->text = "Text extraction is unavailable for this page. The rendered page remains viewable."; }
+        try { result->annotations = p->document->annotations(snap.pages.at(page)); } catch (const std::exception&) {}
         try { result->inventory = p->document->textRuns(snap.pages.at(page)); }
         catch (const std::exception&) { result->inventory.explanation = "Text analysis is unavailable for this page. Viewing remains available."; }
     }, [this, p, snap, page, result, done] {
         if (p->info.revision != snap.revision || p->currentPage != page) return;
         p->image = result->image; p->canvas->setPixmap(QPixmap::fromImage(p->image)); p->canvas->setFixedSize(p->image.deviceIndependentSize().toSize());
         p->textInventory = std::move(result->inventory); p->canvas->runs = p->textInventory.runs;
+        p->canvas->annotations = std::move(result->annotations);
+        p->canvas->pageWidth = p->info.pages[page].width; p->canvas->rotation = p->info.pages[page].rotation;
         p->canvas->selected = 0; p->canvas->scale = p->scale; p->canvas->pageHeight = p->info.pages[page].height;
         p->text->setPlainText(result->text); p->canvas->setAccessibleDescription(QString("Page %1. %2 editable text runs. Enable Edit text, use arrow keys to select, and Enter to edit. Extracted text is available in the Page text panel.").arg(page + 1).arg(p->canvas->runs.size()));
         p->canvas->setToolTip(QString::fromStdString(p->textInventory.explanation));
@@ -456,6 +575,10 @@ void Window::updateActions() {
     undo_->setEnabled(editable && p->info.canUndo); redo_->setEnabled(editable && p->info.canRedo);
     delete_->setEnabled(editable && p->info.pages.size() > 1); earlier_->setEnabled(editable && p->currentPage > 0);
     later_->setEnabled(editable && p->currentPage + 1 < static_cast<int>(p->info.pages.size()));
+    for (auto a : tools_) a->setEnabled(editable);
+    annotationColor_->setEnabled(editable);
+    deleteAnnotation_->setEnabled(editable && p->canvas->selectedAnnotation >= 0);
+    if (p) for (auto a : tools_) { QSignalBlocker block(a); a->setChecked(p->canvas->tool != TextCanvas::Tool::None && a->data().toInt() == static_cast<int>(p->canvas->tool) * 100 + static_cast<int>(toolKind_)); }
     for (auto a : {exportImage_, exportText_, find_}) a->setEnabled(ready);
     zoom_->setEnabled(ready);
     if (ready) zoom_->setCurrentText(QString("%1%").arg(qRound(p->scale * 100)));

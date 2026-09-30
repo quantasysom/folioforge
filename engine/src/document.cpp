@@ -1,6 +1,7 @@
 #include "pdfengine/document.h"
 #include "sfnt.h"
 #include "text_edit.h"
+#include "annotation.h"
 #include <qpdf/QPDF.hh>
 #include <qpdf/QPDFExc.hh>
 #include <qpdf/QPDFPageDocumentHelper.hh>
@@ -72,8 +73,14 @@ std::string restriction(QPDF& pdf) {
     }
     for (auto page : QPDFPageDocumentHelper(pdf).getAllPages()) {
         auto object = page.getObjectHandle();
-        for (const char* key : {"/Annots", "/AA", "/StructParents", "/B", "/PresSteps"})
-            if (object.hasKey(key)) return "Pages with annotations, actions, or structural references are read-only in this preview.";
+        for (const char* key : {"/AA", "/StructParents", "/B", "/PresSteps"})
+            if (object.hasKey(key)) return "Pages with actions or structural references are read-only in this preview.";
+        auto annots = object.getKey("/Annots");
+        if (object.hasKey("/Annots")) {
+            bool safe = annots.isArray();
+            for (int i = 0; safe && i < annots.getArrayNItems(); ++i) safe = annot::preservable(annots.getArrayItem(i));
+            if (!safe) return "Pages with links, form fields, or other interactive annotations are read-only in this preview.";
+        }
     }
     return {};
 }
@@ -395,6 +402,65 @@ TextInventory Document::textRuns(PageId id) const {
     TextInventory result{{}, source.explanation};
     if (store.pdf.getWarnings().empty()) for (auto& item : source.runs) result.runs.push_back(std::move(item.run));
     return result;
+}
+std::vector<Annotation> Document::annotations(PageId id) const {
+    auto ids = idsOf(current_.pages);
+    auto selected = std::find(ids.begin(), ids.end(), id);
+    if (selected == ids.end()) throw Error(ErrorCode::InvalidSelection, "The selected page no longer exists.");
+    Store store(current_.bytes);
+    return annot::list(QPDFPageDocumentHelper(store.pdf).getAllPages()[selected - ids.begin()]);
+}
+namespace {
+// Installs a private copy of /Annots so pages sharing an array (duplicates) are not affected.
+QPDFObjectHandle privateAnnots(QPDFObjectHandle page) {
+    std::vector<QPDFObjectHandle> items;
+    auto old = page.getKey("/Annots");
+    if (old.isArray()) for (int i = 0; i < old.getArrayNItems(); ++i) items.push_back(old.getArrayItem(i));
+    auto copy = QPDFObjectHandle::newArray(items);
+    page.replaceKey("/Annots", copy);
+    return copy;
+}
+}
+void Document::addAnnotation(const AddAnnotation& request) {
+    checkRevision(request.expectedRevision);
+    auto ids = idsOf(current_.pages);
+    auto selected = std::find(ids.begin(), ids.end(), request.page);
+    if (selected == ids.end()) throw Error(ErrorCode::InvalidSelection, "The selected page no longer exists.");
+    Store store(current_.bytes);
+    auto page = QPDFPageDocumentHelper(store.pdf).getAllPages()[selected - ids.begin()];
+    const auto before = annot::list(page).size();
+    std::random_device device;
+    std::ostringstream name; name << annot::namePrefix << std::hex << device() << device();
+    auto annotation = annot::create(store.pdf, request, name.str());
+    auto annots = privateAnnots(page.getObjectHandle());
+    annots.appendItem(annotation);
+    auto bytes = serialize(store.pdf);
+    Store checked(bytes);
+    auto metadata = inspect(checked.pdf, ids);
+    auto after = annot::list(QPDFPageDocumentHelper(checked.pdf).getAllPages()[selected - ids.begin()]);
+    if (after.size() != before + 1 || !store.pdf.getWarnings().empty() || !checked.pdf.getWarnings().empty())
+        throw Error(ErrorCode::InvalidDocument, "Annotation validation failed. The original document was retained.");
+    commit({std::move(bytes), std::move(metadata), nextIdentity_}); ++nextIdentity_;
+}
+void Document::removeAnnotation(PageId id, std::uint32_t index, RevisionId expected) {
+    checkRevision(expected);
+    auto ids = idsOf(current_.pages);
+    auto selected = std::find(ids.begin(), ids.end(), id);
+    if (selected == ids.end()) throw Error(ErrorCode::InvalidSelection, "The selected page no longer exists.");
+    Store store(current_.bytes);
+    auto page = QPDFPageDocumentHelper(store.pdf).getAllPages()[selected - ids.begin()];
+    auto listed = annot::list(page);
+    auto target = std::find_if(listed.begin(), listed.end(), [&](const Annotation& a) { return a.index == index; });
+    if (target == listed.end()) throw Error(ErrorCode::InvalidSelection, "The annotation no longer exists.");
+    if (!target->removable) throw Error(ErrorCode::Unsupported, "Only annotations created in FolioForge can be removed.");
+    auto annots = privateAnnots(page.getObjectHandle());
+    annots.eraseItem(static_cast<int>(index));
+    auto bytes = serialize(store.pdf);
+    Store checked(bytes);
+    auto metadata = inspect(checked.pdf, ids);
+    if (annot::list(QPDFPageDocumentHelper(checked.pdf).getAllPages()[selected - ids.begin()]).size() + 1 != listed.size() || !checked.pdf.getWarnings().empty())
+        throw Error(ErrorCode::InvalidDocument, "Annotation removal validation failed. The original document was retained.");
+    commit({std::move(bytes), std::move(metadata), nextIdentity_}); ++nextIdentity_;
 }
 void Document::setFallbackFonts(const std::vector<std::filesystem::path>& paths) {
     auto source = std::make_shared<font::FontSource>();

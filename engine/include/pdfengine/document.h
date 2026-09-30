@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -46,6 +47,27 @@ struct TextRun {
 struct TextInventory { std::vector<TextRun> runs; std::string explanation; };
 struct ReplaceText { PageId page; std::uint64_t run; RevisionId expectedRevision; std::string text; };
 
+enum class AnnotationKind { Highlight, Underline, StrikeOut, Note, FreeText, Ink, Rectangle, Ellipse, Other };
+struct Point { double x{}, y{}; };
+// Coordinates are PDF user-space points (origin bottom-left, y up) of the unrotated page.
+struct Annotation {
+    std::uint32_t index{};      // Position in the page's /Annots; valid for the revision it was listed at.
+    AnnotationKind kind{AnnotationKind::Other};
+    double x0{}, y0{}, x1{}, y1{};
+    std::array<double, 3> color{};
+    std::string contents;
+    bool removable{};           // True for annotations created by FolioForge; others are preserved untouched.
+};
+struct AddAnnotation {
+    PageId page; RevisionId expectedRevision;
+    AnnotationKind kind{AnnotationKind::Highlight};
+    double x0{}, y0{}, x1{}, y1{};                    // Bounding rectangle (any corner order).
+    std::array<double, 3> color{1, 0.9, 0};           // RGB 0..1.
+    std::string contents;                             // Note text or FreeText body (printable ASCII/Latin-1, \n allowed).
+    std::vector<std::vector<Point>> strokes;          // Ink only.
+    double lineWidth{1.5}, fontSize{12};
+};
+
 // One raster image that becomes a page. `data` is either a complete JPEG file (jpeg == true) or
 // width*height*components interleaved 8-bit samples (1 = gray, 3 = RGB). `alpha` is optional
 // width*height 8-bit opacity. `dpi` <= 0 selects the 96 DPI default.
@@ -84,6 +106,9 @@ public:
     void insertImage(const ImagePage&, PageId after, RevisionId expected);
     TextInventory textRuns(PageId) const;
     void replaceText(const ReplaceText&);
+    std::vector<Annotation> annotations(PageId) const;
+    void addAnnotation(const AddAnnotation&);
+    void removeAnnotation(PageId, std::uint32_t index, RevisionId expected);
     // TrueType (.ttf) fonts tried, in order, before installed system fonts when an edit needs characters the
     // run's own font lacks. Throws Error(Unsupported) if a file cannot be embedded.
     void setFallbackFonts(const std::vector<std::filesystem::path>&);
