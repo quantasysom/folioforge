@@ -8,8 +8,11 @@
 #include <optional>
 #include <QThreadPool>
 #include <array>
+#include <atomic>
 #include <functional>
 class QTabWidget;
+class QBoxLayout;
+class QToolBar;
 class QListWidget;
 class QLabel;
 class QPlainTextEdit;
@@ -27,7 +30,11 @@ public:
     TextCanvas* canvas{};
     QLabel *properties{}, *notice{};
     QWidget* inspector{};
-    QListWidget* comments{};
+    QListWidget *comments{}, *bookmarks{}, *layers{};
+    QWidget* searchPane{};
+    QBoxLayout* pagesBar{};
+    QBoxLayout *commentsBar{}, *bookmarksBar{};
+    std::shared_ptr<std::atomic_bool> thumbToken;
     QLineEdit* addComment{};
     QLabel* commentsTitle{};
     QPlainTextEdit* text{};
@@ -54,7 +61,10 @@ protected:
 private:
     QTabWidget* tabs_{};
     std::shared_ptr<pdfengine::RenderService> renderer_;
-    QThreadPool worker_;
+    QThreadPool worker_, thumbs_;
+    QLineEdit* pageBox_{};
+    int panel_{0}, lastPanel_{0};
+    std::vector<QAction*> panelActions_;
     QComboBox* zoom_{};
     QAction *save_{}, *saveAs_{}, *undo_{}, *redo_{}, *delete_{}, *insert_{}, *merge_{}, *insertImage_{}, *duplicate_{},
             *left_{}, *right_{}, *earlier_{}, *later_{}, *exportImage_{}, *exportText_{}, *find_{}, *editText_{}, *applyText_{}, *cancelText_{};
@@ -81,6 +91,11 @@ private:
     void load(DocumentPane*, const QString&, const QString& password = {});
     void run(DocumentPane*, const QString&, std::function<void()>, std::function<void()> done = {}, std::function<void()> failed = {});
     void refresh(DocumentPane*);
+    void showPanel(int index);
+    void applyPanel(DocumentPane*);
+    void loadThumbnails(DocumentPane*);
+    void wirePanels(DocumentPane*);
+    void goToPage(DocumentPane*, int page);
     void render(DocumentPane*, std::function<void()> done = {});
     void updateActions();
     void command(pdfengine::CommandKind);

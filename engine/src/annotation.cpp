@@ -258,6 +258,9 @@ std::vector<Annotation> list(QPDFPageObjectHelper page) {
                     if (raw.getArrayItem(q).isNumber() && raw.getArrayItem(q + 1).isNumber()) stroke.push_back({raw.getArrayItem(q).getNumericValue(), raw.getArrayItem(q + 1).getNumericValue()});
                 a.strokes.push_back(std::move(stroke));
             }
+        if (auto reply = item.getKey("/IRT"); reply.isIndirect())
+            for (int k = 0; k < annots.getArrayNItems(); ++k)
+                if (k != i && annots.getArrayItem(k).isIndirect() && annots.getArrayItem(k).getObjGen() == reply.getObjGen()) { a.parent = k; break; }
         a.removable = name.isString() && name.getUTF8Value().rfind(namePrefix, 0) == 0;
         out.push_back(std::move(a));
     }

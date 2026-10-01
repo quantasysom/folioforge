@@ -57,9 +57,21 @@ struct Annotation {
     std::array<double, 3> color{};
     std::string contents;
     std::string author;         // /T, the title shown by other viewers.
+    int parent{-1};             // /Annots index of the annotation this one replies to (/IRT), or -1.
     bool removable{};           // True for annotations created by FolioForge; others are preserved untouched (and cannot be edited).
     std::vector<std::vector<Point>> strokes;  // Ink only.
     double lineWidth{1.5}, fontSize{12};
+};
+struct Bookmark {
+    std::uint32_t index{};      // Position in the pre-order outline listing; valid for the revision it was listed at.
+    std::string title;
+    int level{};                // 0 for top-level bookmarks.
+    int page{-1};               // Zero-based destination page, or -1 when it cannot be resolved.
+};
+struct Layer {
+    std::uint32_t index{};      // Position in /OCProperties /OCGs.
+    std::string name;
+    bool visible{true};
 };
 struct AddAnnotation {
     PageId page; RevisionId expectedRevision;
@@ -147,7 +159,20 @@ public:
     // calculations are never run.
     void setFormValue(const SetFormValue&);
     void addAnnotation(const AddAnnotation&);
+    // Removes any listed annotation together with its replies and popup.
     void removeAnnotation(PageId, std::uint32_t index, RevisionId expected);
+    // Changes the text (/Contents) of any listed annotation without touching its appearance. FolioForge text boxes
+    // draw their text in the appearance, so edit those with updateAnnotation instead.
+    void setAnnotationText(PageId, std::uint32_t index, const std::string& text, RevisionId expected);
+    // Adds a threaded reply (a note linked with /IRT) to a listed annotation.
+    void replyToAnnotation(PageId, std::uint32_t parent, const std::string& text, RevisionId expected);
+    std::vector<Bookmark> bookmarks() const;
+    void addBookmark(const std::string& title, PageId page, RevisionId expected);
+    void renameBookmark(std::uint32_t index, const std::string& title, RevisionId expected);
+    void removeBookmark(std::uint32_t index, RevisionId expected);   // Also removes its children.
+    std::vector<Layer> layers() const;
+    void setLayerVisible(std::uint32_t index, bool visible, RevisionId expected);
+    void renameLayer(std::uint32_t index, const std::string& name, RevisionId expected);
     // Rewrites a FolioForge-created annotation in place (move, resize, recolor, new text) keeping its identity and z-order.
     void updateAnnotation(std::uint32_t index, const AddAnnotation& replacement);
     // TrueType (.ttf) fonts tried, in order, before installed system fonts when an edit needs characters the
@@ -187,6 +212,7 @@ private:
     std::filesystem::path path_;
     std::shared_ptr<const Bytes> sourceBytes_;
     void checkRevision(RevisionId) const;
+    template <class Change> void mutateStructure(RevisionId, const char*, Change&&);
     void commit(State);
 };
 

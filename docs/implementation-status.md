@@ -53,3 +53,14 @@ Add a shaping engine (RTL/Indic) and paragraph reflow to text editing. Implement
 - **Signing:** PKCS#12 CMS detached signatures as an incremental update, plus verification. macOS only (Security.framework); other platforms report Unsupported. Signatures are invisible and trust is not evaluated.
 - **Redaction:** draw boxes, then "Apply redactions…" flattens the page to a ~200 dpi raster with the boxes burned in. Text, vectors and annotations on the page are removed, so the page is no longer selectable. Not available on pages with form fields.
 - **Recovery:** unsaved documents are snapshotted every 20 s to the app-data `recovery` folder; on next launch FolioForge offers to restore them as a new file. Cleared on save or close.
+
+## Right-hand panel rail
+
+A vertical icon rail at the right edge switches between four panels (click the active icon to collapse) plus page properties:
+
+- **Comments** – lists comments with replies nested; reply, edit and delete any annotation (replies and popups are removed with their parent). Edits to FolioForge text boxes rebuild their appearance; other annotations only change `/Contents`.
+- **Bookmarks** – add (current page), rename, delete, click to go. Bookmarks of deleted pages are pruned; redaction retargets them. Named destinations (`/Names`, `/Dests`) still make a file read-only.
+- **Pages** – lazily rendered thumbnails; insert blank, duplicate, rotate, delete, click to go.
+- **Layers** – check boxes show/hide optional-content groups (writes `/OCProperties /D /ON,/OFF`, undoable); double-click renames.
+
+The rail bottom holds the page box, previous/next, rotate, fit and zoom −/+. Search opens as a left pane with Ctrl+F.

@@ -2,6 +2,7 @@
 #include "sfnt.h"
 #include "text_edit.h"
 #include "annotation.h"
+#include "navigation.h"
 #include "form.h"
 #include "signing.h"
 #include <qpdf/QPDF.hh>
@@ -19,6 +20,7 @@
 #include <random>
 #include <locale>
 #include <sstream>
+#include <set>
 
 namespace pdfengine {
 namespace {
@@ -72,7 +74,7 @@ std::vector<PageId> idsOf(const std::vector<PageInfo>& pages) {
 std::string restriction(QPDF& pdf) {
     if (pdf.isEncrypted()) return "Encrypted PDFs are read-only in this preview.";
     auto root = pdf.getRoot();
-    for (const char* key : {"/Perms", "/StructTreeRoot", "/Outlines", "/Names", "/Dests", "/PageLabels", "/OpenAction", "/AA", "/Collection"}) {
+    for (const char* key : {"/Perms", "/StructTreeRoot", "/Names", "/Dests", "/PageLabels", "/OpenAction", "/AA", "/Collection"}) {
         if (root.hasKey(key)) return "This PDF contains forms, navigation, signatures, layers, or document structures whose editing is not yet qualified. Read-only mode preserves the original.";
     }
     if (auto reason = form::restriction(root); !reason.empty()) return reason;
@@ -307,7 +309,7 @@ void Document::execute(const Command& command) {
     case CommandKind::Delete:
         if (form::hasWidgets(selected)) throw Error(ErrorCode::Unsupported, "Pages with form fields cannot be deleted yet.");
         if (pages.size() == 1) throw Error(ErrorCode::InvalidSelection, "Keep at least one page in the document.");
-        helper.removePage(selected); ids.erase(ids.begin() + index); break;
+        helper.removePage(selected); ids.erase(ids.begin() + index); nav::prune(store.pdf); break;
     case CommandKind::MoveEarlier:
     case CommandKind::MoveLater: {
         bool earlier = command.kind == CommandKind::MoveEarlier;
@@ -445,6 +447,7 @@ void Document::redactPage(PageId id, RevisionId expected, const ImagePage& raste
     content << "q " << width << " 0 0 " << height << " 0 0 cm /Im0 Do Q\n";
     dict.replaceKey("/Contents", store.pdf.newStream(content.str()));
     helper.addPageAt(replacement, false, old);
+    nav::retarget(store.pdf, old.getObjectHandle(), replacement.getObjectHandle());
     helper.removePage(old);
     auto bytes = serialize(store.pdf);
     Store checked(bytes);
@@ -535,15 +538,115 @@ void Document::removeAnnotation(PageId id, std::uint32_t index, RevisionId expec
     auto listed = annot::list(page);
     auto target = std::find_if(listed.begin(), listed.end(), [&](const Annotation& a) { return a.index == index; });
     if (target == listed.end()) throw Error(ErrorCode::InvalidSelection, "The annotation no longer exists.");
-    if (!target->removable) throw Error(ErrorCode::Unsupported, "Only annotations created in FolioForge can be removed.");
     auto annots = privateAnnots(page.getObjectHandle());
-    annots.eraseItem(static_cast<int>(index));
+    std::set<int> doomed{static_cast<int>(index)};
+    for (bool grew = true; grew;) {
+        grew = false;
+        for (const auto& a : listed) if (a.parent >= 0 && doomed.count(a.parent) && doomed.insert(static_cast<int>(a.index)).second) grew = true;
+    }
+    for (auto i : std::set<int>(doomed)) {
+        auto popup = annots.getArrayItem(i).getKey("/Popup");
+        if (!popup.isIndirect()) continue;
+        for (int k = 0; k < annots.getArrayNItems(); ++k)
+            if (annots.getArrayItem(k).isIndirect() && annots.getArrayItem(k).getObjGen() == popup.getObjGen()) doomed.insert(k);
+    }
+    for (auto it = doomed.rbegin(); it != doomed.rend(); ++it) annots.eraseItem(*it);
+    std::size_t listedGone = 0;
+    for (const auto& a : listed) listedGone += doomed.count(static_cast<int>(a.index));
     auto bytes = serialize(store.pdf);
     Store checked(bytes);
     auto metadata = inspect(checked.pdf, ids);
-    if (annot::list(QPDFPageDocumentHelper(checked.pdf).getAllPages()[selected - ids.begin()]).size() + 1 != listed.size() || !checked.pdf.getWarnings().empty())
+    if (annot::list(QPDFPageDocumentHelper(checked.pdf).getAllPages()[selected - ids.begin()]).size() + listedGone != listed.size() || !checked.pdf.getWarnings().empty())
         throw Error(ErrorCode::InvalidDocument, "Annotation removal validation failed. The original document was retained.");
     commit({std::move(bytes), std::move(metadata), nextIdentity_}); ++nextIdentity_;
+}
+void Document::setAnnotationText(PageId id, std::uint32_t index, const std::string& text, RevisionId expected) {
+    checkRevision(expected);
+    if (text.size() > 20000) throw Error(ErrorCode::ResourceLimit, "Comments are limited to 20,000 bytes.");
+    auto ids = idsOf(current_.pages);
+    auto selected = std::find(ids.begin(), ids.end(), id);
+    if (selected == ids.end()) throw Error(ErrorCode::InvalidSelection, "The selected page no longer exists.");
+    Store store(current_.bytes);
+    auto page = QPDFPageDocumentHelper(store.pdf).getAllPages()[selected - ids.begin()];
+    auto listed = annot::list(page);
+    if (std::none_of(listed.begin(), listed.end(), [&](const Annotation& a) { return a.index == index; }))
+        throw Error(ErrorCode::InvalidSelection, "The annotation no longer exists.");
+    auto annots = privateAnnots(page.getObjectHandle());
+    auto item = annots.getArrayItem(static_cast<int>(index));
+    if (text.empty()) item.removeKey("/Contents"); else item.replaceKey("/Contents", Obj::newUnicodeString(text));
+    auto bytes = serialize(store.pdf);
+    Store checked(bytes);
+    auto metadata = inspect(checked.pdf, ids);
+    if (annot::list(QPDFPageDocumentHelper(checked.pdf).getAllPages()[selected - ids.begin()]).size() != listed.size() || !checked.pdf.getWarnings().empty())
+        throw Error(ErrorCode::InvalidDocument, "Comment validation failed. The original document was retained.");
+    commit({std::move(bytes), std::move(metadata), nextIdentity_}); ++nextIdentity_;
+}
+void Document::replyToAnnotation(PageId id, std::uint32_t parent, const std::string& text, RevisionId expected) {
+    checkRevision(expected);
+    if (text.empty() || text.size() > 20000) throw Error(ErrorCode::InvalidSelection, "Enter a reply of up to 20,000 bytes.");
+    auto ids = idsOf(current_.pages);
+    auto selected = std::find(ids.begin(), ids.end(), id);
+    if (selected == ids.end()) throw Error(ErrorCode::InvalidSelection, "The selected page no longer exists.");
+    Store store(current_.bytes);
+    auto page = QPDFPageDocumentHelper(store.pdf).getAllPages()[selected - ids.begin()];
+    auto listed = annot::list(page);
+    auto target = std::find_if(listed.begin(), listed.end(), [&](const Annotation& a) { return a.index == parent; });
+    if (target == listed.end()) throw Error(ErrorCode::InvalidSelection, "The annotation no longer exists.");
+    auto annots = privateAnnots(page.getObjectHandle());
+    auto parentObject = annots.getArrayItem(static_cast<int>(parent));
+    if (!parentObject.isIndirect()) {
+        parentObject = store.pdf.makeIndirectObject(parentObject);
+        annots.setArrayItem(static_cast<int>(parent), parentObject);
+    }
+    AddAnnotation request{}; request.page = id; request.expectedRevision = expected; request.kind = AnnotationKind::Note;
+    request.x0 = target->x1; request.y1 = target->y1; request.x1 = request.x0 + 18; request.y0 = request.y1 - 18;
+    request.contents = text;
+    std::random_device device;
+    std::ostringstream name; name << annot::namePrefix << std::hex << device() << device();
+    auto reply = annot::create(store.pdf, request, name.str());
+    reply.replaceKey("/IRT", parentObject);
+    reply.replaceKey("/RT", Obj::newName("/R"));
+    annots.appendItem(reply);
+    auto bytes = serialize(store.pdf);
+    Store checked(bytes);
+    auto metadata = inspect(checked.pdf, ids);
+    auto after = annot::list(QPDFPageDocumentHelper(checked.pdf).getAllPages()[selected - ids.begin()]);
+    if (after.size() != listed.size() + 1 || after.back().parent != static_cast<int>(parent) || !checked.pdf.getWarnings().empty())
+        throw Error(ErrorCode::InvalidDocument, "Reply validation failed. The original document was retained.");
+    commit({std::move(bytes), std::move(metadata), nextIdentity_}); ++nextIdentity_;
+}
+std::vector<Bookmark> Document::bookmarks() const { Store store(current_.bytes); return nav::bookmarks(store.pdf); }
+std::vector<Layer> Document::layers() const { Store store(current_.bytes); return nav::layers(store.pdf); }
+template <class Change>
+void Document::mutateStructure(RevisionId expected, const char* what, Change&& change) {
+    checkRevision(expected);
+    Store store(current_.bytes);
+    change(store.pdf);
+    auto bytes = serialize(store.pdf);
+    Store checked(bytes);
+    auto metadata = inspect(checked.pdf, idsOf(current_.pages));
+    if (!store.pdf.getWarnings().empty() || !checked.pdf.getWarnings().empty())
+        throw Error(ErrorCode::InvalidDocument, std::string(what) + " validation failed. The original document was retained.");
+    commit({std::move(bytes), std::move(metadata), nextIdentity_}); ++nextIdentity_;
+}
+void Document::addBookmark(const std::string& title, PageId id, RevisionId expected) {
+    auto ids = idsOf(current_.pages);
+    auto selected = std::find(ids.begin(), ids.end(), id);
+    if (selected == ids.end()) throw Error(ErrorCode::InvalidSelection, "The selected page no longer exists.");
+    const auto index = selected - ids.begin();
+    mutateStructure(expected, "Bookmark", [&](QPDF& pdf) { nav::addBookmark(pdf, title, QPDFPageDocumentHelper(pdf).getAllPages()[index].getObjectHandle()); });
+}
+void Document::renameBookmark(std::uint32_t index, const std::string& title, RevisionId expected) {
+    mutateStructure(expected, "Bookmark", [&](QPDF& pdf) { nav::renameBookmark(pdf, index, title); });
+}
+void Document::removeBookmark(std::uint32_t index, RevisionId expected) {
+    mutateStructure(expected, "Bookmark", [&](QPDF& pdf) { nav::removeBookmark(pdf, index); });
+}
+void Document::setLayerVisible(std::uint32_t index, bool visible, RevisionId expected) {
+    mutateStructure(expected, "Layer", [&](QPDF& pdf) { nav::setLayerVisible(pdf, index, visible); });
+}
+void Document::renameLayer(std::uint32_t index, const std::string& name, RevisionId expected) {
+    mutateStructure(expected, "Layer", [&](QPDF& pdf) { nav::renameLayer(pdf, index, name); });
 }
 std::vector<FormField> Document::formFields(PageId id) const {
     auto ids = idsOf(current_.pages);
