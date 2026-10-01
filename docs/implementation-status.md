@@ -44,3 +44,12 @@ Add a shaping engine (RTL/Indic) and paragraph reflow to text editing. Implement
 - Rendering, text extraction and validation run in the `pdfeditor-render` worker with timeouts, crash recovery and per-platform restrictions (ADR-002).
 - Undo history spills to disk; snapshot/file cap raised from 256 MiB to 1 GiB. Whole-snapshot storage remains, so very large PDFs still cost a full re-serialization per edit.
 - Still open: Linux seccomp and Windows AppContainer for the worker, delta/incremental history, custom/subset/multilingual text editing, paragraph editing, annotation editing/non-ASCII text boxes, form creation/scripts, signing, crash recovery.
+
+## Additions (forms, merge, annotations, signing, redaction, recovery)
+
+- **Forms:** AcroForm text/checkbox/radio/choice filling.
+- **Merge:** page-range insert (`1-3,5`), multi-file merge dialog (PDF, images, DOCX/XLSX/PPTX). Office files need LibreOffice (`soffice`, or set `FOLIOFORGE_SOFFICE`).
+- **Annotations:** create, move, recolor, edit note/free-text content, delete (FolioForge-created annotations only).
+- **Signing:** PKCS#12 CMS detached signatures as an incremental update, plus verification. macOS only (Security.framework); other platforms report Unsupported. Signatures are invisible and trust is not evaluated.
+- **Redaction:** draw boxes, then "Apply redactions…" flattens the page to a ~200 dpi raster with the boxes burned in. Text, vectors and annotations on the page are removed, so the page is no longer selectable. Not available on pages with form fields.
+- **Recovery:** unsaved documents are snapshotted every 20 s to the app-data `recovery` folder; on next launch FolioForge offers to restore them as a new file. Cleared on save or close.

@@ -139,6 +139,7 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
     tabs_ = new QTabWidget; tabs_->setTabsClosable(true); tabs_->setMovable(true); tabs_->setDocumentMode(true); setCentralWidget(tabs_);
     connect(tabs_, &QTabWidget::tabCloseRequested, this, &Window::closeTab);
     connect(tabs_, &QTabWidget::currentChanged, this, [this] { updateActions(); });
+    if (!smoke_) { auto timer = new QTimer(this); connect(timer, &QTimer::timeout, this, [this] { saveRecovery(); }); timer->start(20000); }
     auto file = menuBar()->addMenu("&File"); auto edit = menuBar()->addMenu("&Edit"); auto page = menuBar()->addMenu("&Pages");
     auto view = menuBar()->addMenu("&View"); auto help = menuBar()->addMenu("&Help");
     auto toolbar = addToolBar("Document"); toolbar->setMovable(false); toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
@@ -823,9 +824,56 @@ void Window::closeTab(int index) {
     if (p->info.dirty) {
         auto answer = QMessageBox::warning(this, "Unsaved PDF", "Save changes before closing this document?", QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
         if (answer == QMessageBox::Cancel) return;
-        if (answer == QMessageBox::Save) { save(p, false, [this, p] { tabs_->removeTab(tabs_->indexOf(p)); p->deleteLater(); updateActions(); }); return; }
+        if (answer == QMessageBox::Save) { save(p, false, [this, p] { clearRecovery(p); tabs_->removeTab(tabs_->indexOf(p)); p->deleteLater(); updateActions(); }); return; }
     }
-    tabs_->removeTab(index); p->deleteLater(); updateActions();
+    clearRecovery(p); tabs_->removeTab(index); p->deleteLater(); updateActions();
+}
+QDir Window::recoveryDir() const {
+    QDir dir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/recovery"); dir.mkpath("."); return dir;
+}
+void Window::clearRecovery(DocumentPane* p) {
+    auto id = p->property("recoveryId").toString(); if (id.isEmpty()) return;
+    auto dir = recoveryDir(); QFile::remove(dir.filePath(id + ".pdf")); QFile::remove(dir.filePath(id + ".json")); p->setProperty("recoveryId", QVariant());
+}
+// Periodically snapshots every unsaved document so edits survive a crash.
+void Window::saveRecovery() {
+    auto dir = recoveryDir();
+    for (int i = 0; i < tabs_->count(); ++i) {
+        auto p = dynamic_cast<DocumentPane*>(tabs_->widget(i)); if (!p || p->busy || !p->document) continue;
+        if (!p->info.dirty) { clearRecovery(p); continue; }
+        auto revision = QString::number(p->info.revision);
+        if (p->property("recoveryRevision").toString() == revision && !p->property("recoveryId").toString().isEmpty()) continue;
+        try {
+            auto snapshot = p->document->snapshot(); if (!snapshot.bytes) continue;
+            auto id = p->property("recoveryId").toString();
+            if (id.isEmpty()) id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            pdfengine::atomicWrite(localPath(dir.filePath(id + ".pdf")), *snapshot.bytes, true);
+            QFile meta(dir.filePath(id + ".json"));
+            if (meta.open(QIODevice::WriteOnly | QIODevice::Truncate))
+                meta.write(QJsonDocument(QJsonObject{{"name", tabs_->tabText(i)}, {"path", displayPath(p->info.path)}}).toJson());
+            p->setProperty("recoveryId", id); p->setProperty("recoveryRevision", revision);
+        } catch (const std::exception&) {}
+    }
+}
+void Window::offerRecovery() {
+    auto dir = recoveryDir();
+    for (const auto& entry : dir.entryInfoList({"*.json"}, QDir::Files)) {
+        QFile meta(entry.absoluteFilePath()); if (!meta.open(QIODevice::ReadOnly)) continue;
+        auto object = QJsonDocument::fromJson(meta.readAll()).object(); meta.close();
+        auto pdf = dir.filePath(entry.completeBaseName() + ".pdf");
+        if (!QFileInfo::exists(pdf)) { QFile::remove(entry.absoluteFilePath()); continue; }
+        auto name = object["name"].toString("Untitled.pdf"); auto original = object["path"].toString();
+        auto answer = QMessageBox::question(this, "Recover unsaved work", "FolioForge found unsaved changes to \"" + name + "\" from a previous session. Restore them?", QMessageBox::Yes | QMessageBox::Discard, QMessageBox::Yes);
+        if (answer == QMessageBox::Yes) {
+            auto base = original.isEmpty() ? QDir::homePath() + "/" + QFileInfo(name).completeBaseName() : QFileInfo(original).absolutePath() + "/" + QFileInfo(original).completeBaseName();
+            auto target = QFileDialog::getSaveFileName(this, "Save recovered PDF as", base + "-recovered.pdf", "PDF files (*.pdf)");
+            if (target.isEmpty()) continue;
+            QFile::remove(target);
+            if (!QFile::copy(pdf, target)) { QMessageBox::warning(this, "FolioForge", "Could not write the recovered file."); continue; }
+            openPath(target);
+        }
+        QFile::remove(pdf); QFile::remove(entry.absoluteFilePath());
+    }
 }
 void Window::closeEvent(QCloseEvent* event) {
     if (busy()) { statusBar()->showMessage("Wait for the current operation to finish before closing."); event->ignore(); return; }

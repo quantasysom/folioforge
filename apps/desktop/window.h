@@ -63,6 +63,12 @@ private:
     DocumentPane* active() const;
     DocumentPane* addPane(const QString&);
     void newDocument();
+    QDir recoveryDir() const;
+    void saveRecovery();
+    void clearRecovery(DocumentPane*);
+public:
+    void offerRecovery();
+private:
     void openImages(const QStringList&);
     void mergeFiles(const std::vector<MergeItem>&, const QString& name = "Merged.pdf");
     void load(DocumentPane*, const QString&, const QString& password = {});

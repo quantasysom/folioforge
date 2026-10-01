@@ -25,6 +25,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     Window window(renderer, smoke); window.show();
+    if (!smoke) QTimer::singleShot(0, &window, [&window] { window.offerRecovery(); });
     if (smoke) {
         auto path = QDir::current().absoluteFilePath("smoke-input.pdf");
         if (!QFileInfo::exists(path)) { qCritical() << "Run engine-tests to generate the smoke-test fixture first."; return 1; }
