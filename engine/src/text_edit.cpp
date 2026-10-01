@@ -168,12 +168,26 @@ Inventory inspect(QPDFPageObjectHelper page, PageId id, RevisionId revision) {
         crop.llx != 0 || crop.lly != 0 || crop.urx != box.urx || crop.ury != box.ury ||
         page.getObjectHandle().hasKey("/UserUnit")) return result;
     auto stream = page.getObjectHandle().getKey("/Contents");
-    if (!stream.isStream()) { result.explanation = "Text editing currently requires one page content stream. This page remains viewable."; return result; }
-    auto data = stream.getStreamData();
-    if (data->getSize() > 4*1024*1024) { result.explanation = "This page exceeds the 4 MiB text-analysis limit."; return result; }
-    result.content.assign(reinterpret_cast<const char*>(data->getBuffer()), data->getSize());
+    // /Contents may be one stream or an array of streams; viewers join the pieces with a newline.
+    std::vector<QPDFObjectHandle> parts;
+    if (stream.isStream()) parts.push_back(stream);
+    else if (stream.isArray())
+        for (int i = 0; i < stream.getArrayNItems(); ++i) {
+            auto item = stream.getArrayItem(i);
+            if (!item.isStream()) { result.explanation = "This page's content streams are not readable. This page remains viewable."; return result; }
+            parts.push_back(item);
+        }
+    if (parts.empty()) { result.explanation = "This page has no content stream to edit. This page remains viewable."; return result; }
+    for (std::size_t i = 0; i < parts.size(); ++i) {
+        auto data = parts[i].getStreamData();
+        if (result.content.size() + data->getSize() > 4*1024*1024) { result.content.clear(); result.explanation = "This page exceeds the 4 MiB text-analysis limit."; return result; }
+        if (i) result.content += '\n';
+        result.content.append(reinterpret_cast<const char*>(data->getBuffer()), data->getSize());
+    }
     Parser parser(page.getAttribute("/Resources", false).getKeyIfDict("/Font"), id, revision, box.urx, box.ury);
-    stream.parseAsContents(&parser);
+    // Parse our own joined copy so reported offsets index result.content exactly, whatever the stream layout.
+    auto joined = parts.size() == 1 ? parts[0] : page.getObjectHandle().getOwningQPDF()->newStream(result.content);
+    joined.parseAsContents(&parser);
     if (!parser.malformed) result.runs = std::move(parser.runs);
     return result;
 }

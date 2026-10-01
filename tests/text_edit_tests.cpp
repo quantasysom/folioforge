@@ -21,7 +21,7 @@ Bytes fixture(const std::string& commands, const std::string& font = "<< /Type /
     auto page = Obj::parse("<< /Type /Page /MediaBox [0 0 600 800] >>");
     auto fonts = Obj::newDictionary(); fonts.replaceKey("/F1", pdf.makeIndirectObject(Obj::parse(font)));
     auto resources = Obj::newDictionary(); resources.replaceKey("/Font", fonts); page.replaceKey("/Resources", resources);
-    if (split) page.replaceKey("/Contents", Obj::newArray(std::vector<Obj>{pdf.newStream(commands), pdf.newStream("\n")}));
+    if (split) page.replaceKey("/Contents", Obj::newArray(std::vector<Obj>{pdf.newStream(commands), pdf.newStream("BT /F1 18 Tf 1 0 0 1 40 400 Tm (SECOND) Tj ET\n")}));
     else page.replaceKey("/Contents", pdf.newStream(commands));
     QPDFPageDocumentHelper(pdf).addPage(QPDFPageObjectHelper(pdf.makeIndirectObject(page)), false);
     QPDFWriter writer(pdf); writer.setOutputMemory(); writer.write(); auto bytes = writer.getBufferSharedPointer();
@@ -121,8 +121,15 @@ int main() {
         }
         auto custom = open(commands, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /BaseEncoding /WinAnsiEncoding /Differences [65 /B] >> >>");
         require(custom->textRuns(custom->info().pages[0].id).runs.empty(), "Custom encoding accepted");
-        auto multiple = open(commands, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>", true);
-        require(multiple->textRuns(multiple->info().pages[0].id).runs.empty(), "Multiple streams accepted without source qualification");
+        // A page whose /Contents is an array of streams is editable and the other streams are preserved.
+        auto multiple = open(commands, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>", true);
+        auto multiPage = multiple->info().pages[0].id; auto multiRuns = multiple->textRuns(multiPage);
+        require(multiRuns.runs.size() == 4, "Array contents not offered for editing");
+        multiple->replaceText({multiPage, multiRuns.runs[3].id, multiRuns.runs[3].revision, "LATER"});
+        multiRuns = multiple->textRuns(multiPage);
+        multiple->replaceText({multiPage, multiRuns.runs[0].id, multiRuns.runs[0].revision, "SPLIT"});
+        auto multiText = Renderer::text(multiple->snapshot(), 0);
+        require(multiText.find(u"SPLIT") != std::u16string::npos && multiText.find(u"NEXT") != std::u16string::npos && multiText.find(u"LATER") != std::u16string::npos && multiText.find(u"Lower") != std::u16string::npos, "Array-contents edit lost text");
         require(Renderer::render(original, 0, 1).bgra == before.bgra, "Prior snapshot lifetime broken");
         std::cout << checks << " text-edit checks passed: source mapping, escaped tokens, text growth and reflow, shared resources, round trips, raster invariants, undo, and rejection paths\n";
         return 0;
