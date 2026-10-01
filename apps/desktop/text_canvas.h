@@ -101,6 +101,14 @@ public:
         }
         return match;
     }
+    int annotationAt(QPointF point) const {
+        int match = -1; double area = 0;
+        for (int i = 0; i < static_cast<int>(annotations.size()); ++i) {
+            auto rect = annotationBox(annotations[i]);
+            if (rect.contains(point) && (match < 0 || rect.width() * rect.height() < area)) { match = i; area = rect.width() * rect.height(); }
+        }
+        return match;
+    }
 protected:
     void paintEvent(QPaintEvent* event) override {
         QLabel::paintEvent(event);
@@ -113,14 +121,15 @@ protected:
                 overlay.drawRect(fieldBox(f));
             }
         }
+        if (selectedAnnotation >= 0 && selectedAnnotation < static_cast<int>(annotations.size())) {
+            QPainter overlay(this); overlay.setRenderHint(QPainter::Antialiasing);
+            auto box = annotationBox(annotations[selectedAnnotation]);
+            if (movingAnnotation) box.translate(dragEnd - dragStart);
+            overlay.setPen(QPen(QColor("#1769E8"), 2, Qt::DashLine)); overlay.setBrush(QColor(23, 105, 232, 40));
+            overlay.drawRect(box);
+        }
         if (tool != Tool::None) {
             QPainter overlay(this); overlay.setRenderHint(QPainter::Antialiasing);
-            if (selectedAnnotation >= 0 && selectedAnnotation < static_cast<int>(annotations.size())) {
-                overlay.setPen(QPen(QColor("#1769E8"), 1.5, Qt::DashLine)); overlay.setBrush(Qt::NoBrush);
-                auto box = annotationBox(annotations[selectedAnnotation]);
-                if (movingAnnotation) box.translate(dragEnd - dragStart);
-                overlay.drawRect(box);
-            }
             for (const auto& box : redactions) {
                 overlay.setPen(QPen(QColor(200, 0, 0), 1.5)); overlay.setBrush(QColor(0, 0, 0, 170));
                 overlay.drawRect(QRectF(toView(box.first), toView(box.second)).normalized());
@@ -156,11 +165,7 @@ protected:
             if (tool == Tool::Form) { int hit = fieldAt(event->position()); if (hit >= 0 && fieldClicked) fieldClicked(hit); return; }
             if (tool == Tool::Point) { if (pointPicked) pointPicked(toPdf(event->position())); return; }
             if (tool == Tool::Select) {
-                int match = -1; double area = 0;
-                for (int i = 0; i < static_cast<int>(annotations.size()); ++i) {
-                    auto rect = annotationBox(annotations[i]);
-                    if (rect.contains(event->position()) && (match < 0 || rect.width() * rect.height() < area)) { match = i; area = rect.width() * rect.height(); }
-                }
+                int match = annotationAt(event->position());
                 selectedAnnotation = match; update(); if (annotationSelected) annotationSelected(match);
                 if (match >= 0 && annotations[match].removable) { movingAnnotation = true; dragStart = dragEnd = event->position(); }
                 return;
@@ -170,6 +175,11 @@ protected:
         if (editMode && !editing()) {
             int match = runAt(event->position());
             if (match >= 0) { selected = match; pressPoint = event->position(); update(); if (editRequested) editRequested(match); return; }
+        }
+        if (tool == Tool::None && event->button() == Qt::LeftButton && !editing()) {
+            int match = annotationAt(event->position());
+            selectedAnnotation = match; update(); if (annotationSelected) annotationSelected(match);
+            if (match >= 0) return;
         }
         QLabel::mousePressEvent(event);
     }

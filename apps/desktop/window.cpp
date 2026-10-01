@@ -467,12 +467,14 @@ int Window::advanceSmokeTest() {
 DocumentPane* Window::addPane(const QString& title) {
     auto p = new DocumentPane; tabs_->setCurrentIndex(tabs_->addTab(p, title));
     connect(p->pages, &QListWidget::currentRowChanged, this, [this, p](int row) { if (row >= 0 && !p->busy && !p->canvas->editing()) { p->currentPage = row; render(p); } });
-    connect(p->comments, &QListWidget::currentItemChanged, this, [this, p](QListWidgetItem* item) {
+    auto showComment = [this, p](QListWidgetItem* item) {
         if (!item || !item->data(Qt::UserRole).isValid() || p->busy) return;
         const int page = item->data(Qt::UserRole).toInt(), index = item->data(Qt::UserRole + 1).toInt();
         if (page == p->currentPage) { selectAnnotationByIndex(p, index); return; }
         p->setProperty("pendingAnnotation", index); p->pages->setCurrentRow(page);
-    });
+    };
+    connect(p->comments, &QListWidget::currentItemChanged, this, showComment);
+    connect(p->comments, &QListWidget::itemClicked, this, showComment);
     connect(p->addComment, &QPushButton::clicked, this, [this] {
         for (auto a : tools_) if (a->text() == "Note" && a->isEnabled()) { a->trigger(); statusBar()->showMessage("Click on the page to place a comment"); return; }
         statusBar()->showMessage("This document is read-only, so comments can't be added.");
@@ -515,7 +517,9 @@ DocumentPane* Window::addPane(const QString& title) {
     };
     p->canvas->annotationSelected = [this, p](int i) {
         updateActions();
-        if (i < 0 || i >= static_cast<int>(p->canvas->annotations.size())) return;
+        if (i < 0 || i >= static_cast<int>(p->canvas->annotations.size())) { p->canvas->setToolTip({}); return; }
+        auto text = QString::fromStdString(p->canvas->annotations[i].contents).trimmed();
+        p->canvas->setToolTip(text.toHtmlEscaped().replace("\n", "<br>")); if (!text.isEmpty()) statusBar()->showMessage(text.left(300).replace('\n', ' '));
         const int index = static_cast<int>(p->canvas->annotations[i].index);
         for (int row = 0; row < p->comments->count(); ++row) {
             auto item = p->comments->item(row);
@@ -739,7 +743,7 @@ void Window::run(DocumentPane* p, const QString& label, std::function<void()> wo
 }
 void Window::selectAnnotationByIndex(DocumentPane* p, int index) {
     for (int i = 0; i < static_cast<int>(p->canvas->annotations.size()); ++i)
-        if (static_cast<int>(p->canvas->annotations[i].index) == index) { p->canvas->selectedAnnotation = i; p->canvas->update(); updateActions(); return; }
+        if (static_cast<int>(p->canvas->annotations[i].index) == index) { p->canvas->selectedAnnotation = i; p->canvas->update(); updateActions(); if (p->canvas->annotationSelected) p->canvas->annotationSelected(i); return; }
 }
 void Window::refresh(DocumentPane* p) {
     if (!p->document) return;
