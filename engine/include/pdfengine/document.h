@@ -56,6 +56,7 @@ struct Annotation {
     double x0{}, y0{}, x1{}, y1{};
     std::array<double, 3> color{};
     std::string contents;
+    std::string author;         // /T, the title shown by other viewers.
     bool removable{};           // True for annotations created by FolioForge; others are preserved untouched (and cannot be edited).
     std::vector<std::vector<Point>> strokes;  // Ink only.
     double lineWidth{1.5}, fontSize{12};

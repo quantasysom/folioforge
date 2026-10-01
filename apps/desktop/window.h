@@ -28,7 +28,8 @@ public:
     QLabel *properties{}, *notice{};
     QWidget* inspector{};
     QListWidget* comments{};
-    QPushButton* addComment{};
+    QLineEdit* addComment{};
+    QLabel* commentsTitle{};
     QPlainTextEdit* text{};
     QScrollArea* scroll{};
     QLineEdit* query{};

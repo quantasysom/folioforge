@@ -239,6 +239,7 @@ std::vector<Annotation> list(QPDFPageObjectHelper page) {
             for (int k = 0; k < 3; ++k) if (color.getArrayItem(k).isNumber()) a.color[k] = color.getArrayItem(k).getNumericValue();
         auto contents = item.getKey("/Contents");
         if (contents.isString()) a.contents = contents.getUTF8Value();
+        if (auto title = item.getKey("/T"); title.isString()) a.author = title.getUTF8Value();
         auto name = item.getKey("/NM");
         auto bs = item.getKey("/BS");
         if (bs.isDictionary() && bs.getKey("/W").isNumber()) a.lineWidth = bs.getKey("/W").getNumericValue();

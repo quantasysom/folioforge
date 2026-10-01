@@ -104,6 +104,47 @@ QString exportPath(QWidget* parent, const QString& title, const QString& suffix,
     return path;
 }
 }
+
+// Paints comment cards (title + wrapped body) and per-page group headers.
+class CommentDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override {
+        if (index.data(Qt::UserRole + 4).isValid()) return {0, 38};
+        auto doc = body(index, width(option)); auto fm = QFontMetrics(boldFont(option));
+        return {0, static_cast<int>(18 + fm.height() + 6 + doc->size().height() + 14)};
+    }
+    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override {
+        painter->save(); painter->setRenderHint(QPainter::Antialiasing);
+        const auto r = option.rect;
+        if (index.data(Qt::UserRole + 4).isValid()) {
+            painter->setPen(QColor("#2B2F36")); painter->setFont(boldFont(option));
+            painter->drawText(r.adjusted(14, 0, -14, 0), Qt::AlignVCenter | Qt::AlignLeft, "⌄  " + index.data(Qt::DisplayRole).toString());
+            painter->drawText(r.adjusted(14, 0, -14, 0), Qt::AlignVCenter | Qt::AlignRight, index.data(Qt::UserRole + 4).toString());
+            painter->restore(); return;
+        }
+        if (option.state & QStyle::State_Selected) painter->fillRect(r, QColor("#E8F0FE"));
+        else if (option.state & QStyle::State_MouseOver) painter->fillRect(r, QColor("#F5F7FA"));
+        painter->setPen(Qt::NoPen); painter->setBrush(QColor("#C9CDD3")); painter->drawEllipse(QRect(r.left() + 14, r.top() + 12, 30, 30));
+        painter->setBrush(Qt::NoBrush); painter->setPen(QPen(QColor("#4A4F57"), 1.5)); painter->drawRoundedRect(QRect(r.left() + 22, r.top() + 21, 14, 12), 2, 2);
+        painter->setPen(QColor("#1B1D21")); painter->setFont(boldFont(option));
+        QFontMetrics fm(boldFont(option));
+        painter->drawText(QRect(r.left() + 56, r.top() + 14, r.width() - 70, fm.height()), Qt::AlignVCenter | Qt::AlignLeft,
+            fm.elidedText(index.data(Qt::UserRole + 2).toString(), Qt::ElideRight, r.width() - 70));
+        auto doc = body(index, r.width());
+        painter->translate(r.left() + 56, r.top() + 14 + fm.height() + 6); doc->drawContents(painter); painter->restore();
+    }
+private:
+    static int width(const QStyleOptionViewItem& option) {
+        auto list = qobject_cast<const QListView*>(option.widget);
+        return list ? list->viewport()->width() : 300;
+    }
+    static QFont boldFont(const QStyleOptionViewItem& option) { QFont f = option.font; f.setBold(true); return f; }
+    static std::unique_ptr<QTextDocument> body(const QModelIndex& index, int rowWidth) {
+        auto doc = std::make_unique<QTextDocument>(); doc->setDocumentMargin(0); doc->setTextWidth(std::max(80, rowWidth - 70));
+        doc->setPlainText(index.data(Qt::UserRole + 3).toString()); return doc;
+    }
+};
 DocumentPane::DocumentPane(QWidget* parent) : QWidget(parent) {
     auto outer = new QVBoxLayout(this); outer->setContentsMargins(0, 0, 0, 0); outer->setSpacing(0);
     notice = new QLabel; notice->setWordWrap(true); notice->setMargin(6); notice->hide();
@@ -117,10 +158,6 @@ DocumentPane::DocumentPane(QWidget* parent) : QWidget(parent) {
     query = new QLineEdit; query->setPlaceholderText("Search text, then press Enter"); query->setAccessibleName("Find in document");
     matches = new QListWidget; matches->setWordWrap(true); matches->setAccessibleName("Search results");
     searchLayout->addWidget(query); searchLayout->addWidget(matches); navigation->addTab(searchPane, "Search");
-    auto commentsPane = new QWidget; auto commentsLayout = new QVBoxLayout(commentsPane);
-    addComment = new QPushButton("Add comment (sticky note)");
-    comments = new QListWidget; comments->setWordWrap(true); comments->setAccessibleName("Comments and annotations");
-    commentsLayout->addWidget(addComment); commentsLayout->addWidget(comments); navigation->addTab(commentsPane, "Comments");
     split->addWidget(navigation);
     scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setAlignment(Qt::AlignCenter);
     scroll->setStyleSheet("QScrollArea {background:#E8ECF2;border:0;} QScrollArea > QWidget > QWidget {background:#E8ECF2;}");
@@ -128,15 +165,24 @@ DocumentPane::DocumentPane(QWidget* parent) : QWidget(parent) {
     canvas = new TextCanvas("Opening document…"); canvas->setAlignment(Qt::AlignCenter); canvas->setAccessibleName("Rendered PDF page");
     canvas->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed); stageLayout->addWidget(canvas, 0, Qt::AlignCenter);
     scroll->setWidget(stage); split->addWidget(scroll);
-    inspector = new QWidget; inspector->setMinimumWidth(210); auto propertiesLayout = new QVBoxLayout(inspector);
-    auto title = new QLabel("Page properties"); QFont heading = title->font(); heading.setPointSize(12); heading.setBold(true); title->setFont(heading);
+    auto tabsPane = new QTabWidget; tabsPane->setDocumentMode(true); tabsPane->setMinimumWidth(280); inspector = tabsPane;
+    auto commentsPane = new QWidget; auto commentsLayout = new QVBoxLayout(commentsPane); commentsLayout->setContentsMargins(0, 10, 0, 0); commentsLayout->setSpacing(8);
+    commentsTitle = new QLabel("Comments"); QFont heading = commentsTitle->font(); heading.setPointSize(14); heading.setBold(true); commentsTitle->setFont(heading); commentsTitle->setContentsMargins(14, 0, 14, 0);
+    addComment = new QLineEdit; addComment->setPlaceholderText("Add a comment"); addComment->setAccessibleName("Add a comment");
+    addComment->setStyleSheet("QLineEdit{border:1px solid #9AA0A8;border-radius:5px;padding:8px 10px;margin:0 14px;background:#fff;} QLineEdit:focus{border-color:#1769E8;}");
+    comments = new QListWidget; comments->setAccessibleName("Comments and annotations"); comments->setResizeMode(QListView::Adjust); comments->setFrameShape(QFrame::NoFrame);
+    comments->setItemDelegate(new CommentDelegate(comments)); comments->setMouseTracking(true); comments->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    commentsLayout->addWidget(commentsTitle); commentsLayout->addWidget(addComment); commentsLayout->addWidget(comments, 1); tabsPane->addTab(commentsPane, "Comments");
+    auto inspectorPane = new QWidget; auto propertiesLayout = new QVBoxLayout(inspectorPane);
+    auto title = new QLabel("Page properties"); title->setFont(heading);
     properties = new QLabel; properties->setWordWrap(true); properties->setTextInteractionFlags(Qt::TextSelectableByMouse);
     text = new QPlainTextEdit; text->setReadOnly(true); text->setPlaceholderText("Extracted page text appears here."); text->setAccessibleName("Accessible extracted page text");
     propertiesLayout->addWidget(title); propertiesLayout->addWidget(properties); propertiesLayout->addSpacing(16);
     propertiesLayout->addWidget(new QLabel("Page text")); propertiesLayout->addWidget(text, 1);
-    auto scope = new QLabel("Preview · Local files only\n\nClick-to-type text editing (including embedded fonts and non-Latin text) and Annotate tools (highlight, underline, strike-out, shapes, pen, notes, text boxes) are available. Fill form fills text, check box, radio and drop-down fields (scripts are not run; signature fields are untouched). Signing and redaction are not yet available.");
+    auto scope = new QLabel("Preview · Local files only\n\nClick-to-type text editing (including embedded fonts and non-Latin text) and Annotate tools (highlight, underline, strike-out, shapes, pen, notes, text boxes) are available. Fill form fills text, check box, radio and drop-down fields (scripts are not run; signature fields are untouched). Redaction flattens the page. Signing is available on macOS.");
     scope->setWordWrap(true); scope->setStyleSheet("color:#596579;font-size:11px;"); propertiesLayout->addWidget(scope);
-    split->addWidget(inspector); split->setStretchFactor(1, 1); split->setSizes({220, 850, 260});
+    tabsPane->addTab(inspectorPane, "Page");
+    split->addWidget(inspector); split->setStretchFactor(1, 1); split->setSizes({200, 850, 340});
 }
 Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(std::move(renderer)), smoke_(smoke) {
     worker_.setMaxThreadCount(1);
@@ -147,18 +193,18 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
     if (!smoke_) { auto timer = new QTimer(this); connect(timer, &QTimer::timeout, this, [this] { saveRecovery(); }); timer->start(20000); }
     auto file = menuBar()->addMenu("&File"); auto edit = menuBar()->addMenu("&Edit"); auto page = menuBar()->addMenu("&Pages");
     auto view = menuBar()->addMenu("&View"); auto help = menuBar()->addMenu("&Help");
-    auto toolbar = addToolBar("Document"); toolbar->setMovable(false); toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    toolbar->setIconSize(QSize(20, 20));
+    auto toolbar = addToolBar("Document"); toolbar->setMovable(false); toolbar->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    setStyleSheet("QToolBar{background:#fff;border:0;border-bottom:1px solid #E3E6EB;spacing:4px;padding:3px 8px;} QToolButton{padding:5px 9px;border:0;border-radius:5px;color:#2B2F36;} QToolButton:hover{background:#EEF1F6;} QToolButton:checked{background:#DCE8FF;color:#0B4FC4;} QToolButton:disabled{color:#A9AEB6;} QToolButton::menu-indicator{image:none;} QTabBar::tab{padding:6px 14px;} QStatusBar{background:#fff;border-top:1px solid #E3E6EB;}");
     auto action = [this](QMenu* menu, const QString& label, const QKeySequence& shortcut, auto callback) {
         auto a = menu->addAction(label); a->setShortcut(shortcut); connect(a, &QAction::triggered, this, callback); return a;
     };
     auto create = action(file, "&New PDF", QKeySequence::New, [this] { newDocument(); });
-    create->setIcon(style()->standardIcon(QStyle::SP_FileIcon)); toolbar->addAction(create);
+    create->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
     auto open = action(file, "&Open PDF…", QKeySequence::Open, [this] {
         auto paths = QFileDialog::getOpenFileNames(this, "Open PDF or image", {}, "PDF, images and Office files (*.pdf *.png *.jpg *.jpeg *.docx *.doc *.odt *.rtf *.txt *.xlsx *.xls *.ods *.pptx *.ppt *.odp);;PDF files (*.pdf);;Images (*.png *.jpg *.jpeg)");
         for (auto& path : paths) openPath(path);
     });
-    open->setIcon(style()->standardIcon(QStyle::SP_DialogOpenButton)); toolbar->addAction(open);
+    toolbar->addAction(open);
     action(file, "&Merge files into new PDF…", QKeySequence("Ctrl+Shift+M"), [this] {
         MergeDialog dialog(this); if (dialog.exec() == QDialog::Accepted) mergeFiles(dialog.items());
     });
@@ -167,9 +213,8 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
     });
     file->addSeparator();
     save_ = action(file, "&Save", QKeySequence::Save, [this] { save(active(), false); });
-    save_->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton)); toolbar->addAction(save_);
+    toolbar->addAction(save_);
     saveAs_ = action(file, "Save &As…", QKeySequence::SaveAs, [this] { save(active(), true); });
-    toolbar->addAction(saveAs_);
     save_->setToolTip("Apply any active text edit and save the PDF (Ctrl+S)");
     signAction_ = action(file, "Sign and save copy…", {}, [this] { signDocument(active()); });
     file->addSeparator(); exportImage_ = action(file, "Export current page as PNG…", {}, [this] { exportImage(); });
@@ -194,10 +239,17 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
         auto p = active(); if (p && !p->busy && p->canvas->editing()) commitTextEdit(p, p->canvas->editor->property("runIndex").toInt());
     });
     cancelText_ = action(edit, "Cancel edit", {}, [this] { auto p = active(); if (p && !p->busy) cancelTextEdit(p); });
-    toolbar->addAction(applyText_); toolbar->addAction(cancelText_);
     find_ = action(edit, "&Find…", QKeySequence::Find, [this] { if (auto p = active()) { auto nav = qobject_cast<QTabWidget*>(p->query->parentWidget()->parentWidget()->parentWidget()); if (nav) nav->setCurrentIndex(1); p->query->setFocus(); p->query->selectAll(); } });
     auto annotate = menuBar()->addMenu("&Annotate");
-    auto annotationBar = addToolBar("Annotate"); annotationBar->setMovable(false); annotationBar->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    auto annotationBar = new QToolBar("Tools"); annotationBar->setMovable(false); annotationBar->setOrientation(Qt::Vertical); annotationBar->setToolButtonStyle(Qt::ToolButtonIconOnly); annotationBar->setIconSize(QSize(22, 22));
+    addToolBar(Qt::LeftToolBarArea, annotationBar);
+    auto glyph = [](const QString& text, const QColor& bg = Qt::transparent) {
+        QPixmap pm(44, 44); pm.setDevicePixelRatio(2); pm.fill(Qt::transparent); QPainter g(&pm); g.setRenderHint(QPainter::Antialiasing);
+        if (bg.alpha()) { g.setPen(Qt::NoPen); g.setBrush(bg); g.drawRoundedRect(QRectF(3, 6, 16, 10), 2, 2); }
+        QFont f; f.setPointSize(15); f.setBold(true); g.setFont(f); g.setPen(QColor("#2B2F36")); g.drawText(QRectF(0, 0, 22, 22), Qt::AlignCenter, text); return QIcon(pm);
+    };
+    const QHash<QString, QIcon> icons{{"Select", glyph("➤")}, {"Highlight", glyph("A", QColor(255, 224, 0))}, {"Underline", glyph("U")}, {"Strike-out", glyph("S")}, {"Rectangle", glyph("▭")},
+        {"Ellipse", glyph("◯")}, {"Pen", glyph("✎")}, {"Note", glyph("✉")}, {"Text box", glyph("T")}, {"Fill form", glyph("☑")}, {"Redact", glyph("■")}};
     auto group = new QActionGroup(this); group->setExclusive(true);
     struct ToolSpec { const char* label; AnnotationKind kind; TextCanvas::Tool tool; const char* tip; };
     const ToolSpec specs[] = {
@@ -213,7 +265,7 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
         {"Fill form", AnnotationKind::Other, TextCanvas::Tool::Form, "Click a form field to fill it. Scripts are not run; signature fields are untouched."},
         {"Redact", AnnotationKind::Other, TextCanvas::Tool::Redact, "Drag boxes over content to remove, then choose Apply redactions"}};
     for (const auto& spec : specs) {
-        auto a = new QAction(spec.label, this); a->setCheckable(true); a->setToolTip(spec.tip); a->setStatusTip(spec.tip);
+        auto a = new QAction(spec.label, this); a->setCheckable(true); a->setIcon(icons.value(spec.label)); a->setToolTip(QString("%1 — %2").arg(spec.label, spec.tip)); a->setStatusTip(spec.tip);
         a->setData(QVariant::fromValue<int>(static_cast<int>(spec.tool) * 100 + static_cast<int>(spec.kind)));
         group->addAction(a); annotate->addAction(a); annotationBar->addAction(a); tools_.push_back(a);
         connect(a, &QAction::triggered, this, [this, a] { selectTool(active(), a); });
@@ -231,8 +283,9 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
     applyRedactions_ = action(annotate, "Apply redactions…", {}, [this] { applyRedactions(active()); });
     action(annotate, "Clear pending redactions", {}, [this] { if (auto p = active()) { p->canvas->redactions.clear(); p->canvas->update(); } });
     deleteAnnotation_ = action(annotate, "Delete selected annotation", {}, [this] { removeSelectedAnnotation(active()); });
+    annotationColor_->setIcon(glyph("◐")); deleteAnnotation_->setIcon(glyph("⌫")); annotationColor_->setToolTip("Annotation color"); deleteAnnotation_->setToolTip("Delete selected annotation");
     annotationBar->addSeparator(); annotationBar->addAction(annotationColor_); annotationBar->addAction(deleteAnnotation_);
-    auto organize = addToolBar("Organize pages"); organize->setMovable(false); addToolBarBreak(); addToolBar(Qt::TopToolBarArea, organize);
+    auto organize = new QMenu(this);
     insert_ = action(page, "Insert blank", {}, [this] { command(CommandKind::InsertBlank); });
     merge_ = action(page, "Insert PDF…", {}, [this] {
         auto p = active(); if (!p || p->busy || !p->document) return;
@@ -264,6 +317,7 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
     delete_ = action(page, "Delete page", {}, [this] { command(CommandKind::Delete); });
     for (auto a : {insert_, merge_, insertImage_, duplicate_, left_, right_, earlier_, later_, delete_}) organize->addAction(a);
     toolbar->addSeparator(); toolbar->addAction(find_);
+    { auto pb = new QToolButton; pb->setText("Pages ▾"); pb->setMenu(organize); pb->setPopupMode(QToolButton::InstantPopup); toolbar->addWidget(pb); }
     auto prev = action(view, "Previous page", QKeySequence("Alt+Up"), [this] { auto p = active(); if (p && !p->busy && !p->canvas->editing()) p->pages->setCurrentRow(std::max(0, p->currentPage - 1)); });
     auto next = action(view, "Next page", QKeySequence("Alt+Down"), [this] { auto p = active(); if (p && !p->busy && !p->canvas->editing()) p->pages->setCurrentRow(std::min(p->pages->count() - 1, p->currentPage + 1)); });
     toolbar->addAction(prev); toolbar->addAction(next);
@@ -478,15 +532,19 @@ DocumentPane* Window::addPane(const QString& title) {
     if (propertiesToggle_) p->inspector->setVisible(propertiesToggle_->isChecked());
     connect(p->pages, &QListWidget::currentRowChanged, this, [this, p](int row) { if (row >= 0 && !p->busy && !p->canvas->editing()) { p->currentPage = row; render(p); } });
     auto showComment = [this, p](QListWidgetItem* item) {
-        if (!item || !item->data(Qt::UserRole).isValid() || p->busy) return;
+        if (!item || !item->data(Qt::UserRole + 1).isValid() || p->busy) return;
         const int page = item->data(Qt::UserRole).toInt(), index = item->data(Qt::UserRole + 1).toInt();
         if (page == p->currentPage) { selectAnnotationByIndex(p, index); return; }
         p->setProperty("pendingAnnotation", index); p->pages->setCurrentRow(page);
     };
     connect(p->comments, &QListWidget::currentItemChanged, this, showComment);
     connect(p->comments, &QListWidget::itemClicked, this, showComment);
-    connect(p->addComment, &QPushButton::clicked, this, [this] {
-        for (auto a : tools_) if (a->text() == "Note" && a->isEnabled()) { a->trigger(); statusBar()->showMessage("Click on the page to place a comment"); return; }
+    connect(p->addComment, &QLineEdit::returnPressed, this, [this, p] {
+        auto text = p->addComment->text().trimmed(); if (text.isEmpty()) return;
+        for (auto a : tools_) if (a->text() == "Note" && a->isEnabled()) {
+            p->setProperty("pendingCommentText", text); a->trigger(); p->addComment->clear();
+            statusBar()->showMessage("Click on the page to place your comment"); return;
+        }
         statusBar()->showMessage("This document is read-only, so comments can't be added.");
     });
     p->canvas->editRequested = [this, p](int index) { beginTextEdit(p, index); };
@@ -518,6 +576,7 @@ DocumentPane* Window::addPane(const QString& title) {
         if (p->busy) return;
         AddAnnotation request; request.kind = AnnotationKind::Note; request.x0 = at.x(); request.y0 = at.y();
         if (smoke_) request.contents = "Smoke note";
+        else if (auto pending = p->property("pendingCommentText").toString(); !pending.isEmpty()) { request.contents = pending.toStdString(); p->setProperty("pendingCommentText", QVariant()); }
         else {
             bool ok = false; auto text = QInputDialog::getMultiLineText(this, "Note", "Note text:", {}, &ok);
             if (!ok) return;
@@ -533,7 +592,7 @@ DocumentPane* Window::addPane(const QString& title) {
         const int index = static_cast<int>(p->canvas->annotations[i].index);
         for (int row = 0; row < p->comments->count(); ++row) {
             auto item = p->comments->item(row);
-            if (item->data(Qt::UserRole).isValid() && item->data(Qt::UserRole).toInt() == p->currentPage && item->data(Qt::UserRole + 1).toInt() == index) {
+            if (item->data(Qt::UserRole + 1).isValid() && item->data(Qt::UserRole).toInt() == p->currentPage && item->data(Qt::UserRole + 1).toInt() == index) {
                 QSignalBlocker block(p->comments); p->comments->setCurrentRow(row); p->comments->scrollToItem(item); return;
             }
         }
@@ -773,17 +832,27 @@ void Window::refresh(DocumentPane* p) {
     if (p->comments->property("revision").toULongLong() != p->info.revision || !p->comments->property("built").toBool()) {
         p->comments->clear();
         static const char* names[] = {"Highlight", "Underline", "Strike-out", "Note", "Text box", "Pen", "Rectangle", "Ellipse", "Annotation"};
+        int total = 0;
         for (std::size_t i = 0; i < p->info.pages.size(); ++i) {
             std::vector<Annotation> found;
             try { found = p->document->annotations(p->info.pages[i].id); } catch (const std::exception&) {}
+            std::vector<QListWidgetItem*> cards;
             for (const auto& a : found) {
                 auto text = QString::fromStdString(a.contents).trimmed();
                 if (text.isEmpty() && a.kind != AnnotationKind::Note && a.kind != AnnotationKind::FreeText) continue;
-                auto item = new QListWidgetItem(QString("Page %1 · %2\n%3").arg(i + 1).arg(names[static_cast<int>(a.kind)]).arg(text.isEmpty() ? "(no text)" : text));
-                item->setData(Qt::UserRole, static_cast<int>(i)); item->setData(Qt::UserRole + 1, static_cast<int>(a.index)); p->comments->addItem(item);
+                auto title = QString::fromStdString(a.author); if (title.isEmpty()) title = names[static_cast<int>(a.kind)];
+                auto item = new QListWidgetItem;
+                item->setData(Qt::UserRole, static_cast<int>(i)); item->setData(Qt::UserRole + 1, static_cast<int>(a.index));
+                item->setData(Qt::UserRole + 2, title); item->setData(Qt::UserRole + 3, text); cards.push_back(item);
             }
+            if (cards.empty()) continue;
+            auto header = new QListWidgetItem(QString("Page %1").arg(i + 1)); header->setFlags(Qt::ItemIsEnabled);
+            header->setData(Qt::UserRole + 4, QString::number(cards.size())); p->comments->addItem(header);
+            for (auto c : cards) p->comments->addItem(c);
+            total += static_cast<int>(cards.size());
         }
-        if (!p->comments->count()) { auto item = new QListWidgetItem("No comments yet. Use “Add comment” or the Note tool."); item->setFlags(Qt::NoItemFlags); p->comments->addItem(item); }
+        p->commentsTitle->setText(total ? QString("Comments  %1").arg(total) : "Comments");
+        if (!total) { auto item = new QListWidgetItem("No comments yet. Type above to add one."); item->setFlags(Qt::ItemIsEnabled); item->setData(Qt::UserRole + 4, QString()); item->setData(Qt::DisplayRole, "No comments yet"); p->comments->addItem(item); }
         p->comments->setProperty("revision", QVariant::fromValue<qulonglong>(p->info.revision)); p->comments->setProperty("built", true);
     }
     p->pages->setCurrentRow(p->currentPage);
