@@ -65,6 +65,7 @@ private:
     DocumentPane* active() const;
     DocumentPane* addPane(const QString&);
     void newDocument();
+    void selectAnnotationByIndex(DocumentPane*, int index);
     QDir recoveryDir() const;
     void saveRecovery();
     void clearRecovery(DocumentPane*);

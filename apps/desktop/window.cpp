@@ -467,8 +467,12 @@ int Window::advanceSmokeTest() {
 DocumentPane* Window::addPane(const QString& title) {
     auto p = new DocumentPane; tabs_->setCurrentIndex(tabs_->addTab(p, title));
     connect(p->pages, &QListWidget::currentRowChanged, this, [this, p](int row) { if (row >= 0 && !p->busy && !p->canvas->editing()) { p->currentPage = row; render(p); } });
-    connect(p->comments, &QListWidget::itemActivated, this, [p](QListWidgetItem* item) { auto page = item->data(Qt::UserRole); if (page.isValid()) p->pages->setCurrentRow(page.toInt()); });
-    connect(p->comments, &QListWidget::itemClicked, this, [p](QListWidgetItem* item) { auto page = item->data(Qt::UserRole); if (page.isValid()) p->pages->setCurrentRow(page.toInt()); });
+    connect(p->comments, &QListWidget::currentItemChanged, this, [this, p](QListWidgetItem* item) {
+        if (!item || !item->data(Qt::UserRole).isValid() || p->busy) return;
+        const int page = item->data(Qt::UserRole).toInt(), index = item->data(Qt::UserRole + 1).toInt();
+        if (page == p->currentPage) { selectAnnotationByIndex(p, index); return; }
+        p->setProperty("pendingAnnotation", index); p->pages->setCurrentRow(page);
+    });
     connect(p->addComment, &QPushButton::clicked, this, [this] {
         for (auto a : tools_) if (a->text() == "Note" && a->isEnabled()) { a->trigger(); statusBar()->showMessage("Click on the page to place a comment"); return; }
         statusBar()->showMessage("This document is read-only, so comments can't be added.");
@@ -509,7 +513,17 @@ DocumentPane* Window::addPane(const QString& title) {
         }
         placeAnnotation(p, request);
     };
-    p->canvas->annotationSelected = [this](int) { updateActions(); };
+    p->canvas->annotationSelected = [this, p](int i) {
+        updateActions();
+        if (i < 0 || i >= static_cast<int>(p->canvas->annotations.size())) return;
+        const int index = static_cast<int>(p->canvas->annotations[i].index);
+        for (int row = 0; row < p->comments->count(); ++row) {
+            auto item = p->comments->item(row);
+            if (item->data(Qt::UserRole).isValid() && item->data(Qt::UserRole).toInt() == p->currentPage && item->data(Qt::UserRole + 1).toInt() == index) {
+                QSignalBlocker block(p->comments); p->comments->setCurrentRow(row); p->comments->scrollToItem(item); return;
+            }
+        }
+    };
     p->canvas->annotationMoved = [this, p](int, QPointF d) {
         editAnnotation(p, [d](AddAnnotation& r) {
             r.x0 += d.x(); r.x1 += d.x(); r.y0 += d.y(); r.y1 += d.y();
@@ -723,6 +737,10 @@ void Window::run(DocumentPane* p, const QString& label, std::function<void()> wo
         catch (const std::exception&) { return JobResult{"The operation failed. Your last committed document state is retained.", false}; }
     }));
 }
+void Window::selectAnnotationByIndex(DocumentPane* p, int index) {
+    for (int i = 0; i < static_cast<int>(p->canvas->annotations.size()); ++i)
+        if (static_cast<int>(p->canvas->annotations[i].index) == index) { p->canvas->selectedAnnotation = i; p->canvas->update(); updateActions(); return; }
+}
 void Window::refresh(DocumentPane* p) {
     if (!p->document) return;
     p->info = p->document->info(); p->currentPage = std::clamp(p->currentPage, 0, static_cast<int>(p->info.pages.size()) - 1);
@@ -748,7 +766,7 @@ void Window::refresh(DocumentPane* p) {
                 auto text = QString::fromStdString(a.contents).trimmed();
                 if (text.isEmpty() && a.kind != AnnotationKind::Note && a.kind != AnnotationKind::FreeText) continue;
                 auto item = new QListWidgetItem(QString("Page %1 · %2\n%3").arg(i + 1).arg(names[static_cast<int>(a.kind)]).arg(text.isEmpty() ? "(no text)" : text));
-                item->setData(Qt::UserRole, static_cast<int>(i)); p->comments->addItem(item);
+                item->setData(Qt::UserRole, static_cast<int>(i)); item->setData(Qt::UserRole + 1, static_cast<int>(a.index)); p->comments->addItem(item);
             }
         }
         if (!p->comments->count()) { auto item = new QListWidgetItem("No comments yet. Use “Add comment” or the Note tool."); item->setFlags(Qt::NoItemFlags); p->comments->addItem(item); }
@@ -787,6 +805,7 @@ void Window::render(DocumentPane* p, std::function<void()> done) {
         p->image = result->image; p->canvas->setPixmap(QPixmap::fromImage(p->image)); p->canvas->setFixedSize(p->image.deviceIndependentSize().toSize());
         p->textInventory = std::move(result->inventory); p->canvas->runs = p->textInventory.runs;
         p->canvas->annotations = std::move(result->annotations);
+        if (auto pending = p->property("pendingAnnotation"); pending.isValid()) { p->setProperty("pendingAnnotation", QVariant()); selectAnnotationByIndex(p, pending.toInt()); }
         if (p->canvas->redactionPage != p->info.pages[page].id || p->canvas->redactionRevision != p->info.revision) p->canvas->redactions.clear();
         p->canvas->fields = std::move(result->fields);
         if (!p->canvas->fields.empty() && !p->canvas->formPrompted && p->info.editable && p->canvas->tool == TextCanvas::Tool::None && !p->canvas->editMode) {
