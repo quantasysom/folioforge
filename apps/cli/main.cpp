@@ -26,7 +26,7 @@ int runCli(int argc, char** argv, const std::filesystem::path& executable) {
                          "  pdfeditor-cli inspect INPUT.pdf\n"
                          "  pdfeditor-cli text INPUT.pdf\n"
                          "  pdfeditor-cli rotate INPUT.pdf PAGE OUTPUT.pdf\n"
-                         "  pdfeditor-cli merge FIRST.pdf SECOND.pdf OUTPUT.pdf\n"
+                         "  pdfeditor-cli merge FIRST.pdf SECOND.pdf OUTPUT.pdf [RANGES]\n"
                          "  pdfeditor-cli image INPUT.jpg [MORE.jpg ...] OUTPUT.pdf   (one JPEG per page)\n"
                          "  pdfeditor-cli edit INPUT.pdf PAGE RUN \"NEW TEXT\" OUTPUT.pdf [FALLBACK.ttf]   (RUN is one-based; see 'runs')\n"
                          "  pdfeditor-cli runs INPUT.pdf PAGE\n"
@@ -69,9 +69,9 @@ int runCli(int argc, char** argv, const std::filesystem::path& executable) {
             renderer->validate(doc->snapshot());
             if (std::filesystem::exists(utf8Path(argv[4]))) throw std::runtime_error("Output already exists.");
             doc->save(utf8Path(argv[4]));
-        } else if (operation == "merge" && argc == 5) {
+        } else if (operation == "merge" && (argc == 5 || argc == 6)) {
             auto doc = Document::open(utf8Path(argv[2]));
-            doc->insertDocument(utf8Path(argv[3]), doc->info().pages.back().id, doc->info().revision);
+            doc->insertDocument(utf8Path(argv[3]), doc->info().pages.back().id, doc->info().revision, argc == 6 ? argv[5] : "");
             renderer->validate(doc->snapshot());
             if (std::filesystem::exists(utf8Path(argv[4]))) throw std::runtime_error("Output already exists.");
             doc->save(utf8Path(argv[4]));

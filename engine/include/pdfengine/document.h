@@ -109,6 +109,9 @@ struct HistoryLimits {
     std::size_t entries = 200;
 };
 
+// Parses "1-3,7,10-" (one-based, "-N" and "N-" open ends) into zero-based indexes; throws InvalidSelection.
+std::vector<std::size_t> parsePageRanges(const std::string& text, std::size_t pageCount);
+
 // A session has one owner. Callers serialize access; immutable snapshots may cross threads.
 class Document {
 public:
@@ -122,7 +125,8 @@ public:
     void execute(const Command&);
     void undo(RevisionId expected);
     void redo(RevisionId expected);
-    void insertDocument(const std::filesystem::path&, PageId after, RevisionId expected);
+    // `ranges` selects source pages in the order written ("1-3,7,10-"; empty means every page).
+    void insertDocument(const std::filesystem::path&, PageId after, RevisionId expected, const std::string& ranges = {});
     void insertImage(const ImagePage&, PageId after, RevisionId expected);
     TextInventory textRuns(PageId) const;
     void replaceText(const ReplaceText&);

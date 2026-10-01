@@ -92,6 +92,17 @@ int main() {
         auto importOut = root / "merged.pdf"; content->save(importOut);
         auto merged = Document::open(importOut);
         require(Renderer::text(merged->snapshot(), 1).find(u"FolioForge test") != std::u16string::npos, "Imported text lost after reopen");
+        {
+            auto many = Document::open(input);
+            many->insertDocument(input, many->info().pages[0].id, many->info().revision, "1,1");
+            many->insertDocument(input, many->info().pages[0].id, many->info().revision, "1");
+            require(many->info().pages.size() == 4, "Range insert must add exactly the selected pages");
+            auto r = parsePageRanges("2-3, 5 ,7-", 8);
+            require((r == std::vector<std::size_t>{1, 2, 4, 6, 7}), "Range parsing wrong");
+            require(parsePageRanges("-2", 5).size() == 2 && parsePageRanges("", 3).size() == 3, "Open-ended ranges wrong");
+            for (auto bad : {"0", "9", "3-2", "a", "1,,2", "-", "1-9"}) rejected([&] { parsePageRanges(bad, 8); }, ErrorCode::InvalidSelection);
+            rejected([&] { many->insertDocument(input, many->info().pages[0].id, many->info().revision, "2"); }, ErrorCode::InvalidSelection);
+        }
         auto structured = root / "forms.pdf"; atomicWrite(structured, fixture(true), false);
         auto restricted = Document::open(structured);
         require(!restricted->info().editable, "Structured PDF should be read-only");

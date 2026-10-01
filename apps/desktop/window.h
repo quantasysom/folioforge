@@ -1,4 +1,5 @@
 #pragma once
+#include "merge_dialog.h"
 #include "pdfengine/document.h"
 #include "pdfengine/render_service.h"
 #include <QMainWindow>
@@ -63,6 +64,7 @@ private:
     DocumentPane* addPane(const QString&);
     void newDocument();
     void openImages(const QStringList&);
+    void mergeFiles(const std::vector<MergeItem>&, const QString& name = "Merged.pdf");
     void load(DocumentPane*, const QString&, const QString& password = {});
     void run(DocumentPane*, const QString&, std::function<void()>, std::function<void()> done = {}, std::function<void()> failed = {});
     void refresh(DocumentPane*);

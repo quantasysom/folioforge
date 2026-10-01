@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <numeric>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <random>
@@ -340,7 +341,34 @@ void Document::redo(RevisionId expected) {
     undo_.push_back(current_); current_ = std::move(target); redo_.pop_back(); ++revision_;
     enforceHistoryBudget();
 }
-void Document::insertDocument(const std::filesystem::path& path, PageId after, RevisionId expected) {
+std::vector<std::size_t> parsePageRanges(const std::string& text, std::size_t count) {
+    std::vector<std::size_t> out;
+    auto bad = [&](const std::string& piece) { return Error(ErrorCode::InvalidSelection, "'" + piece + "' is not a valid page range for a " + std::to_string(count) + "-page PDF."); };
+    auto number = [&](const std::string& s, std::size_t& value) {
+        if (s.empty() || s.size() > 7 || !std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isdigit(c); })) return false;
+        value = std::stoul(s); return true;
+    };
+    std::string trimmed;
+    for (char c : text) if (!std::isspace(static_cast<unsigned char>(c))) trimmed += c;
+    if (trimmed.empty()) { for (std::size_t i = 0; i < count; ++i) out.push_back(i); return out; }
+    std::stringstream stream(trimmed); std::string piece;
+    while (std::getline(stream, piece, ',')) {
+        std::size_t first = 1, last = count;
+        auto dash = piece.find('-');
+        if (dash == std::string::npos) { if (!number(piece, first)) throw bad(piece); last = first; }
+        else {
+            auto a = piece.substr(0, dash), b = piece.substr(dash + 1);
+            if (!a.empty() && !number(a, first)) throw bad(piece);
+            if (!b.empty() && !number(b, last)) throw bad(piece);
+            if (a.empty() && b.empty()) throw bad(piece);
+        }
+        if (first < 1 || last < first || last > count) throw bad(piece);
+        for (auto i = first; i <= last; ++i) { out.push_back(i - 1); if (out.size() > maxPages) throw Error(ErrorCode::ResourceLimit, "The selection exceeds 10,000 pages."); }
+    }
+    if (out.empty()) throw bad(text);
+    return out;
+}
+void Document::insertDocument(const std::filesystem::path& path, PageId after, RevisionId expected, const std::string& ranges) {
     checkRevision(expected);
     auto incoming = Document::open(path);
     if (!incoming->editable_) throw Error(ErrorCode::Unsupported, incoming->restriction_);
@@ -351,14 +379,16 @@ void Document::insertDocument(const std::filesystem::path& path, PageId after, R
     auto ids = idsOf(current_.pages);
     auto found = std::find(ids.begin(), ids.end(), after);
     if (found == ids.end()) throw Error(ErrorCode::InvalidSelection, "Select a destination page.");
-    if (ids.size() + incoming->current_.pages.size() > maxPages) throw Error(ErrorCode::ResourceLimit, "The merged PDF exceeds 10,000 pages.");
+    auto selection = parsePageRanges(ranges, incoming->current_.pages.size());
+    if (ids.size() + selection.size() > maxPages) throw Error(ErrorCode::ResourceLimit, "The merged PDF exceeds 10,000 pages.");
     auto index = static_cast<std::size_t>(found - ids.begin());
     Store store(current_.bytes), source(incoming->current_.bytes);
     QPDFPageDocumentHelper helper(store.pdf);
     auto anchor = helper.getAllPages()[index];
     PageId next = nextPage_;
-    for (auto page : QPDFPageDocumentHelper(source.pdf).getAllPages()) {
-        helper.addPageAt(page, false, anchor);
+    auto sourcePages = QPDFPageDocumentHelper(source.pdf).getAllPages();
+    for (auto pick : selection) {
+        helper.addPageAt(sourcePages.at(pick), false, anchor);
         anchor = helper.getAllPages()[++index];
         ids.insert(ids.begin() + index, next++);
     }

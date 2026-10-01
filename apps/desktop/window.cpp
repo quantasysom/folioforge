@@ -1,5 +1,7 @@
 #include "window.h"
 #include "text_canvas.h"
+#include "merge_dialog.h"
+#include "office_convert.h"
 #include "pdfengine/render_service.h"
 #include <QtWidgets>
 #include <QtConcurrent/QtConcurrentRun>
@@ -72,6 +74,26 @@ QImage imageOf(const Bitmap& bitmap) {
 }
 struct JobResult { QString error; bool password{}; };
 struct PageRender { QImage image; QString text; TextInventory inventory; std::vector<Annotation> annotations; std::vector<FormField> fields; };
+// Builds a new document from PDFs (with page ranges), images and Office files (via LibreOffice), in order.
+std::shared_ptr<Document> assemble(const std::vector<MergeItem>& items) {
+    auto document = Document::create();
+    const auto blank = document->info().pages[0].id;
+    QTemporaryDir work;
+    if (!work.isValid()) throw std::runtime_error("A temporary folder could not be created.");
+    int counter = 0;
+    for (const auto& item : items) {
+        auto info = document->info();
+        if (isImagePath(item.path)) { document->insertImage(loadImage(item.path), info.pages.back().id, info.revision); continue; }
+        QString pdf = item.path;
+        if (office::isOfficePath(item.path)) pdf = office::convertToPdf(item.path, work.filePath(QString::number(++counter)));
+        else if (!item.path.endsWith(".pdf", Qt::CaseInsensitive)) throw std::runtime_error(QFileInfo(item.path).fileName().toStdString() + " is not a supported file type.");
+        try { document->insertDocument(localPath(pdf), info.pages.back().id, info.revision, item.ranges.toStdString()); }
+        catch (const Error& e) { throw Error(e.code, QFileInfo(item.path).fileName().toStdString() + ": " + e.what()); }
+    }
+    auto info = document->info();
+    document->execute({CommandKind::Delete, blank, info.revision});
+    return document;
+}
 QString exportPath(QWidget* parent, const QString& title, const QString& suffix, const QString& filter) {
     auto path = QFileDialog::getSaveFileName(parent, title, "export." + suffix, filter, nullptr, QFileDialog::DontConfirmOverwrite);
     if (path.isEmpty()) return {};
@@ -126,10 +148,13 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
     auto create = action(file, "&New PDF", QKeySequence::New, [this] { newDocument(); });
     create->setIcon(style()->standardIcon(QStyle::SP_FileIcon)); toolbar->addAction(create);
     auto open = action(file, "&Open PDF…", QKeySequence::Open, [this] {
-        auto paths = QFileDialog::getOpenFileNames(this, "Open PDF or image", {}, "PDF and images (*.pdf *.png *.jpg *.jpeg);;PDF files (*.pdf);;Images (*.png *.jpg *.jpeg)");
+        auto paths = QFileDialog::getOpenFileNames(this, "Open PDF or image", {}, "PDF, images and Office files (*.pdf *.png *.jpg *.jpeg *.docx *.doc *.odt *.rtf *.txt *.xlsx *.xls *.ods *.pptx *.ppt *.odp);;PDF files (*.pdf);;Images (*.png *.jpg *.jpeg)");
         for (auto& path : paths) openPath(path);
     });
     open->setIcon(style()->standardIcon(QStyle::SP_DialogOpenButton)); toolbar->addAction(open);
+    action(file, "&Merge files into new PDF…", QKeySequence("Ctrl+Shift+M"), [this] {
+        MergeDialog dialog(this); if (dialog.exec() == QDialog::Accepted) mergeFiles(dialog.items());
+    });
     action(file, "Images to new PDF…", QKeySequence("Ctrl+Shift+I"), [this] {
         auto paths = QFileDialog::getOpenFileNames(this, "Convert images to one PDF (one image per page)", {}, "Images (*.png *.jpg *.jpeg)"); openImages(paths);
     });
@@ -195,9 +220,12 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
     insert_ = action(page, "Insert blank", {}, [this] { command(CommandKind::InsertBlank); });
     merge_ = action(page, "Insert PDF…", {}, [this] {
         auto p = active(); if (!p || p->busy || !p->document) return;
-        auto path = QFileDialog::getOpenFileName(this, "Insert all pages after the current page", {}, "PDF files (*.pdf)"); if (path.isEmpty()) return;
+        auto path = QFileDialog::getOpenFileName(this, "Insert pages from a PDF after the current page", {}, "PDF files (*.pdf)"); if (path.isEmpty()) return;
+        bool ok = true; QString ranges;
+        if (!smoke_) ranges = QInputDialog::getText(this, "Pages to insert", "Pages (for example 1-3,5,8-; blank = all):", QLineEdit::Normal, {}, &ok);
+        if (!ok) return;
         auto id = p->info.pages[p->currentPage].id; auto rev = p->info.revision;
-        run(p, "Inserting PDF", [p, path, id, rev] { p->document->insertDocument(localPath(path), id, rev); }, [this, p] { render(p); });
+        run(p, "Inserting PDF", [p, path, id, rev, ranges] { p->document->insertDocument(localPath(path), id, rev, ranges.toStdString()); }, [this, p] { render(p); });
     });
     insertImage_ = action(page, "Insert image…", {}, [this] {
         auto p = active(); if (!p || p->busy || !p->document) return;
@@ -380,7 +408,25 @@ int Window::advanceSmokeTest() {
         if (!p->canvas->annotations.empty()) return -1;
         tools_[9]->trigger();
         if (p->canvas->tool != TextCanvas::Tool::Form || !p->canvas->fields.empty()) return -1;
+#ifndef _WIN32
+        {
+            // A stand-in for LibreOffice: copies the smoke PDF to where the real converter would write its output.
+            auto script = QDir::current().absoluteFilePath("fake-soffice.sh");
+            QFile file(script);
+            if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return -1;
+            file.write("#!/bin/sh\nout=\nfor a in \"$@\"; do if [ \"$prev\" = --outdir ]; then out=$a; fi; prev=$a; last=$a; done\nb=$(basename \"$last\")\ncp \"" + QDir::current().absoluteFilePath("smoke-input.pdf").toUtf8() + "\" \"$out/${b%.*}.pdf\"\n");
+            file.close(); file.setPermissions(file.permissions() | QFileDevice::ExeUser);
+            qputenv("FOLIOFORGE_SOFFICE", script.toUtf8());
+            auto sample = QDir::current().absoluteFilePath("smoke-sample.docx"); QFile doc(sample); if (!doc.open(QIODevice::WriteOnly)) return -1; doc.write("x"); doc.close();
+            mergeFiles({{QDir::current().absoluteFilePath("smoke-input.pdf"), "1"}, {QDir::current().absoluteFilePath("smoke-image.png"), {}}, {sample, {}}}, "Merged.pdf");
+        }
+        break;
+    case 22:
+        if (p->info.pages.size() != 3 || !tabs_->tabText(tabs_->currentIndex()).startsWith("Merged.pdf")) return -1;
         return 1;
+#else
+        return 1;
+#endif
     default:
         return 1;
     }
@@ -514,6 +560,12 @@ void Window::removeSelectedAnnotation(DocumentPane* p) {
     run(p, "Removing annotation", [p, id, target, revision] { p->document->removeAnnotation(id, target.index, revision); }, [this, p] { render(p); });
 }
 void Window::newDocument() { auto p = addPane("Untitled.pdf"); run(p, "Creating PDF", [p] { p->document = Document::create(); }, [this, p] { render(p); }); }
+void Window::mergeFiles(const std::vector<MergeItem>& items, const QString& name) {
+    if (items.empty()) return;
+    auto p = addPane(name); p->setProperty("suggestedName", name);
+    run(p, "Merging files", [p, items] { p->document = assemble(items); }, [this, p] { render(p); },
+        [this, p] { tabs_->removeTab(tabs_->indexOf(p)); p->deleteLater(); updateActions(); });
+}
 void Window::openImages(const QStringList& paths) {
     if (paths.isEmpty()) return;
     auto p = addPane(QFileInfo(paths.first()).completeBaseName() + ".pdf");
@@ -530,6 +582,7 @@ void Window::openImages(const QStringList& paths) {
 }
 void Window::openPath(const QString& path) {
     if (isImagePath(path)) { openImages({path}); return; }
+    if (office::isOfficePath(path)) { mergeFiles({{path, {}}}, QFileInfo(path).completeBaseName() + ".pdf"); return; }
     auto p = addPane(QFileInfo(path).fileName()); p->setProperty("openingPath", path); load(p, path);
 }
 void Window::load(DocumentPane* p, const QString& path, const QString& password) {
@@ -702,7 +755,7 @@ void Window::dropEvent(QDropEvent* event) {
     for (const auto& url : event->mimeData()->urls()) {
         if (!url.isLocalFile()) continue;
         auto path = url.toLocalFile();
-        if (path.endsWith(".pdf", Qt::CaseInsensitive)) openPath(path); else if (isImagePath(path)) images << path;
+        if (path.endsWith(".pdf", Qt::CaseInsensitive) || office::isOfficePath(path)) openPath(path); else if (isImagePath(path)) images << path;
     }
     openImages(images); event->acceptProposedAction();
 }
