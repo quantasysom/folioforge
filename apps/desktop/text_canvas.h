@@ -1,4 +1,5 @@
 #pragma once
+#include <cmath>
 #include "pdfengine/document.h"
 #include <QLabel>
 #include <QLineEdit>
@@ -41,10 +42,13 @@ public:
     std::function<void(int)> fieldClicked;
     std::vector<pdfengine::Annotation> annotations;
     int selectedAnnotation{-1};
+    bool movingAnnotation{false};
     std::function<void(QPointF, QPointF)> areaDrawn;
     std::function<void(std::vector<std::vector<QPointF>>)> strokeDrawn;
     std::function<void(QPointF)> pointPicked;
     std::function<void(int)> annotationSelected;
+    std::function<void(int, QPointF)> annotationMoved;   // index, PDF-point offset
+    std::function<void(int)> annotationActivated;        // double-click
     // Page space (points, y up, unrotated page) <-> canvas pixels.
     QPointF toPdf(const QPointF& view) const {
         const double u = view.x() / scale, v = view.y() / scale;
@@ -111,7 +115,9 @@ protected:
             QPainter overlay(this); overlay.setRenderHint(QPainter::Antialiasing);
             if (selectedAnnotation >= 0 && selectedAnnotation < static_cast<int>(annotations.size())) {
                 overlay.setPen(QPen(QColor("#1769E8"), 1.5, Qt::DashLine)); overlay.setBrush(Qt::NoBrush);
-                overlay.drawRect(annotationBox(annotations[selectedAnnotation]));
+                auto box = annotationBox(annotations[selectedAnnotation]);
+                if (movingAnnotation) box.translate(dragEnd - dragStart);
+                overlay.drawRect(box);
             }
             if (dragging && tool == Tool::Area) {
                 overlay.setPen(QPen(QColor("#1769E8"), 1, Qt::DashLine)); overlay.setBrush(QColor(23, 105, 232, 30));
@@ -125,6 +131,7 @@ protected:
         painter.setPen(QPen(QColor("#1769E8"), 1)); painter.setBrush(QColor(23, 105, 232, 28)); painter.drawRect(box(hovered));
     }
     void mouseMoveEvent(QMouseEvent* event) override {
+        if (movingAnnotation) { dragEnd = event->position(); update(); return; }
         if (tool != Tool::None && dragging) {
             dragEnd = event->position();
             if (tool == Tool::Pen) currentStroke.append(event->position());
@@ -148,7 +155,9 @@ protected:
                     auto rect = annotationBox(annotations[i]);
                     if (rect.contains(event->position()) && (match < 0 || rect.width() * rect.height() < area)) { match = i; area = rect.width() * rect.height(); }
                 }
-                selectedAnnotation = match; update(); if (annotationSelected) annotationSelected(match); return;
+                selectedAnnotation = match; update(); if (annotationSelected) annotationSelected(match);
+                if (match >= 0 && annotations[match].removable) { movingAnnotation = true; dragStart = dragEnd = event->position(); }
+                return;
             }
             dragging = true; dragStart = dragEnd = event->position(); currentStroke = {event->position()}; update(); return;
         }
@@ -158,7 +167,19 @@ protected:
         }
         QLabel::mousePressEvent(event);
     }
+    void mouseDoubleClickEvent(QMouseEvent* event) override {
+        if (tool == Tool::Select && !editMode && selectedAnnotation >= 0 && annotationActivated) { movingAnnotation = false; annotationActivated(selectedAnnotation); return; }
+        QLabel::mouseDoubleClickEvent(event);
+    }
     void mouseReleaseEvent(QMouseEvent* event) override {
+        if (movingAnnotation && event->button() == Qt::LeftButton) {
+            movingAnnotation = false; dragEnd = event->position();
+            const auto delta = dragEnd - dragStart; update();
+            if ((std::abs(delta.x()) > 2 || std::abs(delta.y()) > 2) && annotationMoved) {
+                auto a = toPdf(dragStart), b = toPdf(dragEnd); annotationMoved(selectedAnnotation, b - a);
+            }
+            return;
+        }
         if (dragging && event->button() == Qt::LeftButton) {
             dragging = false; dragEnd = event->position(); update();
             if (tool == Tool::Area && areaDrawn) areaDrawn(toPdf(dragStart), toPdf(dragEnd));

@@ -81,6 +81,36 @@ int main() {
         reopened->redo(reopened->info().revision);
         require(reopened->annotations(info.pages[0].id).size() == 7, "Redo must remove it again");
 
+        // Editing: move/resize/recolor/retext keep identity and order; foreign annotations are protected.
+        {
+            auto id = reopened->info().pages[0].id;
+            auto before = reopened->annotations(id);
+            const auto& rect = before[0]; // After removal+redo above, index 0 is the underline.
+            AddAnnotation edit; edit.page = id; edit.expectedRevision = reopened->info().revision; edit.kind = rect.kind;
+            edit.x0 = rect.x0 + 100; edit.x1 = rect.x1 + 100; edit.y0 = rect.y0; edit.y1 = rect.y1; edit.color = {0, 0.5, 1};
+            reopened->updateAnnotation(0, edit);
+            auto after = reopened->annotations(id);
+            require(after.size() == before.size() && after[0].x0 == rect.x0 + 100 && after[0].color[2] == 1 && after[0].removable, "Annotation update wrong");
+            reopened->undo(reopened->info().revision);
+            require(reopened->annotations(id)[0].x0 == rect.x0, "Undo must restore the old annotation");
+            reopened->redo(reopened->info().revision);
+            std::size_t inkAt = 0, noteAt = 0;
+            auto cur = reopened->annotations(id);
+            for (std::size_t i = 0; i < cur.size(); ++i) { if (cur[i].kind == AnnotationKind::Ink) inkAt = i; if (cur[i].kind == AnnotationKind::Note) noteAt = i; }
+            require(cur[inkAt].strokes.size() == 2 && cur[inkAt].strokes[0].size() == 3 && cur[inkAt].lineWidth == 6, "Ink geometry not listed");
+            AddAnnotation ink; ink.page = id; ink.expectedRevision = reopened->info().revision; ink.kind = AnnotationKind::Ink; ink.color = cur[inkAt].color; ink.lineWidth = cur[inkAt].lineWidth;
+            for (auto stroke : cur[inkAt].strokes) { for (auto& pt : stroke) pt.y += 50; ink.strokes.push_back(stroke); }
+            reopened->updateAnnotation(static_cast<std::uint32_t>(inkAt), ink);
+            require(reopened->annotations(id)[inkAt].strokes[0][0].y == cur[inkAt].strokes[0][0].y + 50, "Ink move failed");
+            AddAnnotation note; note.page = id; note.expectedRevision = reopened->info().revision; note.kind = AnnotationKind::Note; note.x0 = cur[noteAt].x0; note.y0 = cur[noteAt].y0;
+            note.contents = "Edited note"; note.color = cur[noteAt].color;
+            reopened->updateAnnotation(static_cast<std::uint32_t>(noteAt), note);
+            require(reopened->annotations(id)[noteAt].contents == "Edited note", "Note text edit failed");
+            auto wrongKind = note; wrongKind.expectedRevision = reopened->info().revision; wrongKind.kind = AnnotationKind::Rectangle;
+            rejected([&] { reopened->updateAnnotation(static_cast<std::uint32_t>(noteAt), wrongKind); }, ErrorCode::InvalidSelection);
+            rejected([&] { reopened->updateAnnotation(99, edit); }, ErrorCode::StaleRevision);
+        }
+
         // A duplicated page shares no annotation state with the original.
         auto shared = Document::open(path);
         auto sInfo = shared->info();

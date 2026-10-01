@@ -214,6 +214,11 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
         auto chosen = QColorDialog::getColor(customColor_.value_or(QColor(255, 224, 0)), this, "Annotation color");
         if (chosen.isValid()) customColor_ = chosen;
     });
+    action(annotate, "Recolor selected annotation…", {}, [this] {
+        auto p = active(); if (!p) return;
+        auto chosen = QColorDialog::getColor(customColor_.value_or(QColor(255, 224, 0)), this, "Annotation color");
+        if (chosen.isValid()) editAnnotation(p, [chosen](AddAnnotation& r) { r.color = {chosen.redF(), chosen.greenF(), chosen.blueF()}; });
+    });
     deleteAnnotation_ = action(annotate, "Delete selected annotation", {}, [this] { removeSelectedAnnotation(active()); });
     annotationBar->addSeparator(); annotationBar->addAction(annotationColor_); annotationBar->addAction(deleteAnnotation_);
     auto organize = addToolBar("Organize pages"); organize->setMovable(false); addToolBarBreak(); addToolBar(Qt::TopToolBarArea, organize);
@@ -466,6 +471,21 @@ DocumentPane* Window::addPane(const QString& title) {
         placeAnnotation(p, request);
     };
     p->canvas->annotationSelected = [this](int) { updateActions(); };
+    p->canvas->annotationMoved = [this, p](int, QPointF d) {
+        editAnnotation(p, [d](AddAnnotation& r) {
+            r.x0 += d.x(); r.x1 += d.x(); r.y0 += d.y(); r.y1 += d.y();
+            for (auto& stroke : r.strokes) for (auto& pt : stroke) { pt.x += d.x(); pt.y += d.y(); }
+        });
+    };
+    p->canvas->annotationActivated = [this, p](int) {
+        const int i = p->canvas->selectedAnnotation;
+        if (i < 0 || i >= static_cast<int>(p->canvas->annotations.size())) return;
+        const auto kind = p->canvas->annotations[i].kind;
+        if (kind != AnnotationKind::Note && kind != AnnotationKind::FreeText) return;
+        bool ok = false;
+        auto text = QInputDialog::getMultiLineText(this, "Edit annotation", "Text:", QString::fromStdString(p->canvas->annotations[i].contents), &ok);
+        if (ok && !text.isEmpty()) editAnnotation(p, [text](AddAnnotation& r) { r.contents = text.toStdString(); });
+    };
     p->canvas->fieldClicked = [this, p](int index) { fillField(p, index); };
     for (auto key : {QKeySequence(Qt::Key_Delete), QKeySequence(Qt::Key_Backspace)}) {
         auto removal = new QShortcut(key, p->canvas); removal->setContext(Qt::WidgetShortcut);
@@ -549,6 +569,18 @@ void Window::placeAnnotation(DocumentPane* p, AddAnnotation request) {
     if (!p || p->busy || !p->document || !p->info.editable) return;
     request.page = p->info.pages[p->currentPage].id; request.expectedRevision = p->info.revision; request.color = annotationRgb();
     run(p, "Adding annotation", [p, request] { p->document->addAnnotation(request); }, [this, p] { render(p); });
+}
+void Window::editAnnotation(DocumentPane* p, std::function<void(AddAnnotation&)> change) {
+    if (!p || p->busy || !p->document || !p->info.editable) return;
+    const int selected = p->canvas->selectedAnnotation;
+    if (selected < 0 || selected >= static_cast<int>(p->canvas->annotations.size())) return;
+    const auto target = p->canvas->annotations[selected];
+    if (!target.removable) { statusBar()->showMessage("This annotation came from another program and is preserved unchanged."); return; }
+    AddAnnotation request; request.page = p->info.pages[p->currentPage].id; request.expectedRevision = p->info.revision; request.kind = target.kind;
+    request.x0 = target.x0; request.y0 = target.y0; request.x1 = target.x1; request.y1 = target.y1; request.color = target.color;
+    request.contents = target.contents; request.strokes = target.strokes; request.lineWidth = target.lineWidth; request.fontSize = target.fontSize;
+    change(request);
+    run(p, "Editing annotation", [p, request, index = target.index] { p->document->updateAnnotation(index, request); }, [this, p] { render(p); });
 }
 void Window::removeSelectedAnnotation(DocumentPane* p) {
     if (!p || p->busy || !p->document || !p->info.editable) return;

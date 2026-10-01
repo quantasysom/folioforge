@@ -76,6 +76,7 @@ private:
     void selectTool(DocumentPane*, QAction*);
     std::array<double, 3> annotationRgb() const;
     void placeAnnotation(DocumentPane*, pdfengine::AddAnnotation);
+    void editAnnotation(DocumentPane*, std::function<void(pdfengine::AddAnnotation&)>);
     void removeSelectedAnnotation(DocumentPane*);
     void fillField(DocumentPane*, int);
     void search(DocumentPane*);

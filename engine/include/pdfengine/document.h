@@ -56,7 +56,9 @@ struct Annotation {
     double x0{}, y0{}, x1{}, y1{};
     std::array<double, 3> color{};
     std::string contents;
-    bool removable{};           // True for annotations created by FolioForge; others are preserved untouched.
+    bool removable{};           // True for annotations created by FolioForge; others are preserved untouched (and cannot be edited).
+    std::vector<std::vector<Point>> strokes;  // Ink only.
+    double lineWidth{1.5}, fontSize{12};
 };
 struct AddAnnotation {
     PageId page; RevisionId expectedRevision;
@@ -137,6 +139,8 @@ public:
     void setFormValue(const SetFormValue&);
     void addAnnotation(const AddAnnotation&);
     void removeAnnotation(PageId, std::uint32_t index, RevisionId expected);
+    // Rewrites a FolioForge-created annotation in place (move, resize, recolor, new text) keeping its identity and z-order.
+    void updateAnnotation(std::uint32_t index, const AddAnnotation& replacement);
     // TrueType (.ttf) fonts tried, in order, before installed system fonts when an edit needs characters the
     // run's own font lacks. Throws Error(Unsupported) if a file cannot be embedded.
     void setFallbackFonts(const std::vector<std::filesystem::path>&);

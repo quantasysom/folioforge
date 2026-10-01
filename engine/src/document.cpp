@@ -525,6 +525,29 @@ void Document::setFormValue(const SetFormValue& request) {
     }
     commit({std::move(bytes), std::move(metadata), nextIdentity_}); ++nextIdentity_;
 }
+void Document::updateAnnotation(std::uint32_t index, const AddAnnotation& request) {
+    checkRevision(request.expectedRevision);
+    auto ids = idsOf(current_.pages);
+    auto selected = std::find(ids.begin(), ids.end(), request.page);
+    if (selected == ids.end()) throw Error(ErrorCode::InvalidSelection, "The selected page no longer exists.");
+    Store store(current_.bytes);
+    auto page = QPDFPageDocumentHelper(store.pdf).getAllPages()[selected - ids.begin()];
+    auto listed = annot::list(page);
+    auto target = std::find_if(listed.begin(), listed.end(), [&](const Annotation& a) { return a.index == index; });
+    if (target == listed.end()) throw Error(ErrorCode::InvalidSelection, "The annotation no longer exists.");
+    if (!target->removable) throw Error(ErrorCode::Unsupported, "Only annotations created in FolioForge can be edited.");
+    if (target->kind != request.kind) throw Error(ErrorCode::InvalidSelection, "An annotation cannot change its type.");
+    auto old = QPDFPageObjectHelper(page).getObjectHandle().getKey("/Annots").getArrayItem(static_cast<int>(index));
+    auto replacement = annot::create(store.pdf, request, annot::nameOf(old));
+    privateAnnots(page.getObjectHandle()).setArrayItem(static_cast<int>(index), replacement);
+    auto bytes = serialize(store.pdf);
+    Store checked(bytes);
+    auto metadata = inspect(checked.pdf, ids);
+    auto after = annot::list(QPDFPageDocumentHelper(checked.pdf).getAllPages()[selected - ids.begin()]);
+    if (after.size() != listed.size() || !after[target - listed.begin()].removable || !store.pdf.getWarnings().empty() || !checked.pdf.getWarnings().empty())
+        throw Error(ErrorCode::InvalidDocument, "Annotation update validation failed. The original document was retained.");
+    commit({std::move(bytes), std::move(metadata), nextIdentity_}); ++nextIdentity_;
+}
 void Document::setFallbackFonts(const std::vector<std::filesystem::path>& paths) {
     auto source = std::make_shared<font::FontSource>();
     try { source->setFonts(paths); } catch (const std::exception& error) { throw Error(ErrorCode::Unsupported, error.what()); }

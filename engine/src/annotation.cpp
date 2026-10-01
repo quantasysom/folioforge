@@ -214,6 +214,11 @@ bool preservable(Obj annotation) {
     return known && !annotation.hasKey("/A") && !annotation.hasKey("/AA") && !annotation.hasKey("/Dest");
 }
 
+std::string nameOf(Obj annotation) {
+    auto name = annotation.isDictionary() ? annotation.getKey("/NM") : Obj::newNull();
+    return name.isString() ? name.getUTF8Value() : std::string();
+}
+
 std::vector<Annotation> list(QPDFPageObjectHelper page) {
     std::vector<Annotation> out;
     auto annots = page.getObjectHandle().getKey("/Annots");
@@ -235,6 +240,23 @@ std::vector<Annotation> list(QPDFPageObjectHelper page) {
         auto contents = item.getKey("/Contents");
         if (contents.isString()) a.contents = contents.getUTF8Value();
         auto name = item.getKey("/NM");
+        auto bs = item.getKey("/BS");
+        if (bs.isDictionary() && bs.getKey("/W").isNumber()) a.lineWidth = bs.getKey("/W").getNumericValue();
+        auto da = item.getKey("/DA");
+        if (da.isString()) {
+            std::istringstream tokens(da.getUTF8Value()); std::vector<std::string> t; std::string w;
+            while (tokens >> w) t.push_back(w);
+            for (std::size_t k = 2; k < t.size(); ++k) if (t[k] == "Tf") { try { a.fontSize = std::stod(t[k - 1]); } catch (...) {} break; }
+        }
+        auto ink = item.getKey("/InkList");
+        if (ink.isArray() && ink.getArrayNItems() <= static_cast<int>(maxStrokes))
+            for (int k = 0; k < ink.getArrayNItems(); ++k) {
+                auto raw = ink.getArrayItem(k); if (!raw.isArray()) continue;
+                std::vector<Point> stroke;
+                for (int q = 0; q + 1 < raw.getArrayNItems(); q += 2)
+                    if (raw.getArrayItem(q).isNumber() && raw.getArrayItem(q + 1).isNumber()) stroke.push_back({raw.getArrayItem(q).getNumericValue(), raw.getArrayItem(q + 1).getNumericValue()});
+                a.strokes.push_back(std::move(stroke));
+            }
         a.removable = name.isString() && name.getUTF8Value().rfind(namePrefix, 0) == 0;
         out.push_back(std::move(a));
     }
