@@ -28,7 +28,7 @@ Bytes fixture(bool structures = false, bool encrypted = false) {
     auto resources = O::newDictionary(); resources.replaceKey("/Font", fonts); page.replaceKey("/Resources", resources);
     page.replaceKey("/Contents", pdf.newStream("0.1 0.4 0.8 rg 30 320 260 80 re f\nBT /F1 22 Tf 30 280 Td (FolioForge test) Tj ET\n"));
     QPDFPageDocumentHelper(pdf).addPage(QPDFPageObjectHelper(pdf.makeIndirectObject(page)), false);
-    if (structures) pdf.getRoot().replaceKey("/AcroForm", O::parse("<< /Fields [] >>"));
+    if (structures) pdf.getRoot().replaceKey("/Outlines", O::parse("<< /Type /Outlines /Count 0 >>"));
     QPDFWriter writer(pdf); writer.setOutputMemory();
     if (encrypted) writer.setR6EncryptionParameters("secret", "owner", true, true, true, true, true, true, qpdf_r3p_full, true);
     writer.write(); auto buffer = writer.getBufferSharedPointer(); return Bytes(buffer->getBuffer(), buffer->getBuffer() + buffer->getSize());

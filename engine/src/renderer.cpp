@@ -1,6 +1,7 @@
 #include "pdfengine/renderer.h"
 #include <fpdfview.h>
 #include <fpdf_text.h>
+#include <fpdf_formfill.h>
 #include <cmath>
 #include <mutex>
 
@@ -13,13 +14,17 @@ struct Library {
 };
 struct Handle {
     FPDF_DOCUMENT value{};
+    FPDF_FORMFILLINFO info{};
+    FPDF_FORMHANDLE form{};
     explicit Handle(const Snapshot& snapshot) {
         static Library library;
         if (!snapshot.bytes || snapshot.bytes->empty()) throw Error(ErrorCode::InvalidDocument, "Empty rendering snapshot.");
         value = FPDF_LoadMemDocument64(snapshot.bytes->data(), snapshot.bytes->size(), nullptr);
         if (!value) throw Error(ErrorCode::InvalidDocument, "PDFium could not open the committed PDF.");
+        info.version = 1; // No scripting or callbacks: the environment only draws widgets.
+        form = FPDFDOC_InitFormFillEnvironment(value, &info);
     }
-    ~Handle() { FPDF_CloseDocument(value); }
+    ~Handle() { if (form) FPDFDOC_ExitFormFillEnvironment(form); FPDF_CloseDocument(value); }
 };
 struct Page {
     FPDF_PAGE value{};
@@ -44,6 +49,11 @@ Bitmap renderPage(Handle& doc, const Snapshot& snapshot, std::size_t index, doub
     if (!bitmap) throw Error(ErrorCode::ResourceLimit, "Unable to allocate the page bitmap.");
     FPDFBitmap_FillRect(bitmap, 0, 0, result.width, result.height, 0xffffffff);
     FPDF_RenderPageBitmap(bitmap, page.value, 0, 0, result.width, result.height, 0, FPDF_ANNOT);
+    if (doc.form) {
+        FORM_OnAfterLoadPage(page.value, doc.form);
+        FPDF_FFLDraw(doc.form, bitmap, page.value, 0, 0, result.width, result.height, 0, FPDF_ANNOT);
+        FORM_OnBeforeClosePage(page.value, doc.form);
+    }
     FPDFBitmap_Destroy(bitmap);
     return result;
 }

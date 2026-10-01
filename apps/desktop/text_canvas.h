@@ -35,7 +35,10 @@ public:
     double scale{1}, pageHeight{}, pageWidth{};
     int rotation{};
     // Annotation tool: None does nothing, Area drags a rectangle, Pen draws freehand, Point places at a click, Select picks an annotation.
-    enum class Tool { None, Area, Pen, Point, Select } tool{Tool::None};
+    enum class Tool { None, Area, Pen, Point, Select, Form } tool{Tool::None};
+    std::vector<pdfengine::FormField> fields;
+    bool formPrompted{};
+    std::function<void(int)> fieldClicked;
     std::vector<pdfengine::Annotation> annotations;
     int selectedAnnotation{-1};
     std::function<void(QPointF, QPointF)> areaDrawn;
@@ -63,6 +66,13 @@ public:
     QRectF annotationBox(const pdfengine::Annotation& a) const {
         return QRectF(toView({a.x0, a.y0}), toView({a.x1, a.y1})).normalized().adjusted(-2, -2, 2, 2);
     }
+    QRectF fieldBox(const pdfengine::FormField& f) const {
+        return QRectF(toView({f.x0, f.y0}), toView({f.x1, f.y1})).normalized();
+    }
+    int fieldAt(const QPointF& point) const {
+        for (int i = 0; i < static_cast<int>(fields.size()); ++i) if (fieldBox(fields[i]).contains(point)) return i;
+        return -1;
+    }
     bool editMode{};
     int selected{}, hovered{-1};
     QPointF pressPoint{-1, -1};
@@ -88,6 +98,15 @@ public:
 protected:
     void paintEvent(QPaintEvent* event) override {
         QLabel::paintEvent(event);
+        if (tool == Tool::Form) {
+            QPainter overlay(this);
+            for (const auto& f : fields) {
+                const bool locked = f.readOnly || f.kind == pdfengine::FormFieldKind::Signature || f.kind == pdfengine::FormFieldKind::Button;
+                overlay.setPen(QPen(locked ? QColor(130, 130, 130, 160) : QColor(23, 105, 232, 200), 1));
+                overlay.setBrush(locked ? QColor(130, 130, 130, 25) : QColor(23, 105, 232, 30));
+                overlay.drawRect(fieldBox(f));
+            }
+        }
         if (tool != Tool::None) {
             QPainter overlay(this); overlay.setRenderHint(QPainter::Antialiasing);
             if (selectedAnnotation >= 0 && selectedAnnotation < static_cast<int>(annotations.size())) {
@@ -121,6 +140,7 @@ protected:
     void leaveEvent(QEvent* event) override { hovered = -1; unsetCursor(); update(); QLabel::leaveEvent(event); }
     void mousePressEvent(QMouseEvent* event) override {
         if (tool != Tool::None && !editMode && event->button() == Qt::LeftButton) {
+            if (tool == Tool::Form) { int hit = fieldAt(event->position()); if (hit >= 0 && fieldClicked) fieldClicked(hit); return; }
             if (tool == Tool::Point) { if (pointPicked) pointPicked(toPdf(event->position())); return; }
             if (tool == Tool::Select) {
                 int match = -1; double area = 0;

@@ -75,6 +75,7 @@ private:
     std::array<double, 3> annotationRgb() const;
     void placeAnnotation(DocumentPane*, pdfengine::AddAnnotation);
     void removeSelectedAnnotation(DocumentPane*);
+    void fillField(DocumentPane*, int);
     void search(DocumentPane*);
     void exportImage();
     void exportText();

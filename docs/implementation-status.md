@@ -19,7 +19,7 @@ The supplied plan is a multi-phase product specification. The initial workspace 
 | C-01 / C-02 / C-06 | QPDF token/source spans, bounded graphics/text-state interpretation, Tj/TJ replacement for standard, simple, embedded/subset and Identity-H CID fonts, Unicode text with automatic fallback-font subset embedding, downstream advance preservation, shared-stream isolation, on-page editing | General content IR, shaping/RTL scripts, non-Identity CMaps, CFF fallback fonts, font reuse across edits, form XObjects, rotated/clipped content, paragraph editing |
 | Q-01 | Generated fixture ownership and semantic/raster tests | Independent-viewer release corpus and formal manifest |
 
-All other items remain unimplemented. The constrained text-editing subset does not represent the full text/content engine. Annotations: add/list/remove of highlight, underline, strike-out, rectangle, ellipse, ink, note and ASCII free-text with generated appearance streams (`annotation-workflows`). The conversion suite, annotation editing, forms, signing, recovery, printing, and installers are not represented as complete.
+All other items remain unimplemented. The constrained text-editing subset does not represent the full text/content engine. Annotations: add/list/remove of highlight, underline, strike-out, rectangle, ellipse, ink, note and ASCII free-text with generated appearance streams (`annotation-workflows`). Forms: fill text/checkbox/radio/choice fields with regenerated appearances; signed, XFA and tagged forms stay read-only (`form-workflows`). The conversion suite, annotation editing, form creation, scripted forms, signing, recovery, printing, and installers are not represented as complete.
 
 ## Verification
 
@@ -43,4 +43,4 @@ Add a shaping engine (RTL/Indic) and paragraph reflow to text editing. Implement
 - GitHub Actions builds and runs all suites on Windows, Linux and macOS. Locally verified so far on macOS arm64 only; the Windows and Linux legs are unverified until CI runs.
 - Rendering, text extraction and validation run in the `pdfeditor-render` worker with timeouts, crash recovery and per-platform restrictions (ADR-002).
 - Undo history spills to disk; snapshot/file cap raised from 256 MiB to 1 GiB. Whole-snapshot storage remains, so very large PDFs still cost a full re-serialization per edit.
-- Still open: Linux seccomp and Windows AppContainer for the worker, delta/incremental history, custom/subset/multilingual text editing, paragraph editing, annotation editing/non-ASCII text boxes, forms, signing, crash recovery.
+- Still open: Linux seccomp and Windows AppContainer for the worker, delta/incremental history, custom/subset/multilingual text editing, paragraph editing, annotation editing/non-ASCII text boxes, form creation/scripts, signing, crash recovery.

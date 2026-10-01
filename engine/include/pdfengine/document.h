@@ -68,6 +68,26 @@ struct AddAnnotation {
     double lineWidth{1.5}, fontSize{12};
 };
 
+enum class FormFieldKind { Text, Checkbox, Radio, Choice, Button, Signature };
+// One widget of an AcroForm field on a page. Coordinates are PDF points like Annotation.
+struct FormField {
+    std::uint32_t widget{};          // Position in the page's /Annots; valid for the revision it was listed at.
+    FormFieldKind kind{FormFieldKind::Text};
+    std::string name;                // Fully qualified field name.
+    std::string value;               // Text/choice value (export value for choices).
+    bool checked{};                  // Checkbox/radio: this widget is on.
+    std::vector<std::string> options, optionValues; // Choice display strings and export values.
+    bool readOnly{};                 // Not editable (read-only flag, signature, push button, or unsupported variant).
+    bool multiline{}, password{}, combo{}, editable{};
+    int maxLength{};
+    double x0{}, y0{}, x1{}, y1{};
+};
+struct SetFormValue {
+    PageId page; RevisionId expectedRevision; std::uint32_t widget{};
+    std::string text;                // Text fields and choices (UTF-8).
+    bool checked{};                  // Checkboxes and radio buttons.
+};
+
 // One raster image that becomes a page. `data` is either a complete JPEG file (jpeg == true) or
 // width*height*components interleaved 8-bit samples (1 = gray, 3 = RGB). `alpha` is optional
 // width*height 8-bit opacity. `dpi` <= 0 selects the 96 DPI default.
@@ -107,6 +127,10 @@ public:
     TextInventory textRuns(PageId) const;
     void replaceText(const ReplaceText&);
     std::vector<Annotation> annotations(PageId) const;
+    std::vector<FormField> formFields(PageId) const;
+    // Fills one field. Appearance streams are regenerated so every viewer shows the value. Scripts and
+    // calculations are never run.
+    void setFormValue(const SetFormValue&);
     void addAnnotation(const AddAnnotation&);
     void removeAnnotation(PageId, std::uint32_t index, RevisionId expected);
     // TrueType (.ttf) fonts tried, in order, before installed system fonts when an edit needs characters the

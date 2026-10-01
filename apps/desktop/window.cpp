@@ -71,7 +71,7 @@ QImage imageOf(const Bitmap& bitmap) {
     return QImage(bitmap.bgra.data(), bitmap.width, bitmap.height, bitmap.stride, QImage::Format_ARGB32).copy();
 }
 struct JobResult { QString error; bool password{}; };
-struct PageRender { QImage image; QString text; TextInventory inventory; std::vector<Annotation> annotations; };
+struct PageRender { QImage image; QString text; TextInventory inventory; std::vector<Annotation> annotations; std::vector<FormField> fields; };
 QString exportPath(QWidget* parent, const QString& title, const QString& suffix, const QString& filter) {
     auto path = QFileDialog::getSaveFileName(parent, title, "export." + suffix, filter, nullptr, QFileDialog::DontConfirmOverwrite);
     if (path.isEmpty()) return {};
@@ -106,7 +106,7 @@ DocumentPane::DocumentPane(QWidget* parent) : QWidget(parent) {
     text = new QPlainTextEdit; text->setReadOnly(true); text->setPlaceholderText("Extracted page text appears here."); text->setAccessibleName("Accessible extracted page text");
     propertiesLayout->addWidget(title); propertiesLayout->addWidget(properties); propertiesLayout->addSpacing(16);
     propertiesLayout->addWidget(new QLabel("Page text")); propertiesLayout->addWidget(text, 1);
-    auto scope = new QLabel("Preview · Local files only\n\nClick-to-type text editing (including embedded fonts and non-Latin text) and Annotate tools (highlight, underline, strike-out, shapes, pen, notes, text boxes) are available. Forms, signing, and redaction are not yet available.");
+    auto scope = new QLabel("Preview · Local files only\n\nClick-to-type text editing (including embedded fonts and non-Latin text) and Annotate tools (highlight, underline, strike-out, shapes, pen, notes, text boxes) are available. Fill form fills text, check box, radio and drop-down fields (scripts are not run; signature fields are untouched). Signing and redaction are not yet available.");
     scope->setWordWrap(true); scope->setStyleSheet("color:#596579;font-size:11px;"); propertiesLayout->addWidget(scope);
     split->addWidget(inspector); split->setStretchFactor(1, 1); split->setSizes({220, 850, 260});
 }
@@ -176,7 +176,8 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
         {"Pen", AnnotationKind::Ink, TextCanvas::Tool::Pen, "Draw freehand"},
         {"Note", AnnotationKind::Note, TextCanvas::Tool::Point, "Click to place a sticky note"},
         {"Text box", AnnotationKind::FreeText, TextCanvas::Tool::Area, "Drag a box, then type the text to place"},
-        {"Select", AnnotationKind::Other, TextCanvas::Tool::Select, "Click an annotation to select it"}};
+        {"Select", AnnotationKind::Other, TextCanvas::Tool::Select, "Click an annotation to select it"},
+        {"Fill form", AnnotationKind::Other, TextCanvas::Tool::Form, "Click a form field to fill it. Scripts are not run; signature fields are untouched."}};
     for (const auto& spec : specs) {
         auto a = new QAction(spec.label, this); a->setCheckable(true); a->setToolTip(spec.tip); a->setStatusTip(spec.tip);
         a->setData(QVariant::fromValue<int>(static_cast<int>(spec.tool) * 100 + static_cast<int>(spec.kind)));
@@ -377,6 +378,8 @@ int Window::advanceSmokeTest() {
         deleteAnnotation_->trigger(); break;
     case 21:
         if (!p->canvas->annotations.empty()) return -1;
+        tools_[9]->trigger();
+        if (p->canvas->tool != TextCanvas::Tool::Form || !p->canvas->fields.empty()) return -1;
         return 1;
     default:
         return 1;
@@ -417,6 +420,7 @@ DocumentPane* Window::addPane(const QString& title) {
         placeAnnotation(p, request);
     };
     p->canvas->annotationSelected = [this](int) { updateActions(); };
+    p->canvas->fieldClicked = [this, p](int index) { fillField(p, index); };
     for (auto key : {QKeySequence(Qt::Key_Delete), QKeySequence(Qt::Key_Backspace)}) {
         auto removal = new QShortcut(key, p->canvas); removal->setContext(Qt::WidgetShortcut);
         connect(removal, &QShortcut::activated, this, [this, p] { if (p->canvas->tool == TextCanvas::Tool::Select) removeSelectedAnnotation(p); });
@@ -441,8 +445,59 @@ void Window::selectTool(DocumentPane* p, QAction* action) {
     p->canvas->tool = static_cast<TextCanvas::Tool>(code / 100); toolKind_ = static_cast<AnnotationKind>(code % 100);
     if (p->canvas->editing()) cancelTextEdit(p);
     p->canvas->editMode = false; p->canvas->selectedAnnotation = -1; p->canvas->update();
-    p->canvas->setCursor(p->canvas->tool == TextCanvas::Tool::Select ? Qt::ArrowCursor : Qt::CrossCursor);
+    p->canvas->setCursor(p->canvas->tool == TextCanvas::Tool::Select || p->canvas->tool == TextCanvas::Tool::Form ? Qt::ArrowCursor : Qt::CrossCursor);
     statusBar()->showMessage(action->toolTip()); updateActions();
+}
+void Window::fillField(DocumentPane* p, int index) {
+    if (!p || p->busy || index < 0 || index >= static_cast<int>(p->canvas->fields.size())) return;
+    const auto field = p->canvas->fields[index];
+    if (field.kind == FormFieldKind::Signature) { statusBar()->showMessage("Signature fields are not changed by FolioForge."); return; }
+    if (field.readOnly || field.kind == FormFieldKind::Button) { statusBar()->showMessage("This field is read-only or is a button that needs scripts."); return; }
+    SetFormValue request; request.page = p->info.pages[p->currentPage].id; request.expectedRevision = p->info.revision; request.widget = field.widget;
+    auto apply = [this, p, request](SetFormValue value) {
+        run(p, "Filling form", [p, value] { p->document->setFormValue(value); }, [this, p] { render(p); });
+    };
+    switch (field.kind) {
+    case FormFieldKind::Checkbox: request.checked = !field.checked; apply(request); break;
+    case FormFieldKind::Radio: request.checked = true; apply(request); break;
+    case FormFieldKind::Choice: {
+        QMenu menu;
+        for (std::size_t i = 0; i < field.options.size() && i < 500; ++i) {
+            auto a = menu.addAction(QString::fromStdString(field.options[i])); a->setData(static_cast<int>(i)); a->setCheckable(true); a->setChecked(field.optionValues[i] == field.value);
+        }
+        QAction* other = nullptr; QAction* clear = nullptr;
+        if (field.editable) { menu.addSeparator(); other = menu.addAction("Other…"); }
+        if (!field.value.empty()) clear = menu.addAction("Clear");
+        auto chosen = menu.exec(p->canvas->mapToGlobal(p->canvas->fieldBox(field).bottomLeft().toPoint()));
+        if (!chosen) return;
+        if (chosen == other) {
+            bool ok = false; auto text = QInputDialog::getText(this, "Value", "Value:", QLineEdit::Normal, QString::fromStdString(field.value), &ok);
+            if (!ok) return; request.text = text.toStdString();
+        } else if (chosen == clear) request.text.clear();
+        else request.text = field.optionValues[chosen->data().toInt()];
+        apply(request); break;
+    }
+    case FormFieldKind::Text: {
+        if (field.multiline) {
+            bool ok = false; auto text = QInputDialog::getMultiLineText(this, "Fill field", QString::fromStdString(field.name), QString::fromStdString(field.value), &ok);
+            if (!ok) return; request.text = text.toStdString(); apply(request); break;
+        }
+        auto editor = new InlineEditor(p->canvas);
+        auto rect = p->canvas->fieldBox(field).toRect();
+        editor->setGeometry(rect.adjusted(-1, -1, 1, 1)); editor->setText(QString::fromStdString(field.value));
+        if (field.password) editor->setEchoMode(QLineEdit::Password);
+        if (field.maxLength > 0) editor->setMaxLength(field.maxLength);
+        auto finish = [editor](bool) { editor->finished = true; editor->hide(); editor->deleteLater(); };
+        editor->cancel = [finish] { finish(false); };
+        editor->commit = [this, editor, finish, apply, request] {
+            auto value = request; value.text = editor->text().toStdString(); finish(true); apply(value);
+        };
+        connect(editor, &QLineEdit::returnPressed, editor, [editor] { if (editor->commit) editor->commit(); });
+        editor->show(); editor->setFocus(); editor->selectAll();
+        break;
+    }
+    default: break;
+    }
 }
 void Window::placeAnnotation(DocumentPane* p, AddAnnotation request) {
     if (!p || p->busy || !p->document || !p->info.editable) return;
@@ -536,12 +591,13 @@ void Window::render(DocumentPane* p, std::function<void()> done) {
     auto result = std::make_shared<PageRender>();
     int page = p->currentPage; double scale = p->scale; double dpr = devicePixelRatioF(); auto snap = p->document->snapshot();
     // Never show the previous page as if it belonged to a newly selected revision.
-    p->canvas->runs.clear(); p->canvas->annotations.clear(); p->canvas->selectedAnnotation = -1; p->canvas->clear(); p->canvas->setText("Rendering page…"); p->text->clear(); p->image = {};
+    p->canvas->runs.clear(); p->canvas->annotations.clear(); p->canvas->fields.clear(); p->canvas->selectedAnnotation = -1; p->canvas->clear(); p->canvas->setText("Rendering page…"); p->text->clear(); p->image = {};
     run(p, "Rendering page", [p, snap, page, scale, dpr, result, renderer = renderer_] {
         result->image = imageOf(renderer->render(snap, page, scale * dpr)); result->image.setDevicePixelRatio(dpr);
         try { result->text = QString::fromStdU16String(renderer->text(snap, page)); }
         catch (const std::exception&) { result->text = "Text extraction is unavailable for this page. The rendered page remains viewable."; }
         try { result->annotations = p->document->annotations(snap.pages.at(page)); } catch (const std::exception&) {}
+        try { result->fields = p->document->formFields(snap.pages.at(page)); } catch (const std::exception&) {}
         try { result->inventory = p->document->textRuns(snap.pages.at(page)); }
         catch (const std::exception&) { result->inventory.explanation = "Text analysis is unavailable for this page. Viewing remains available."; }
     }, [this, p, snap, page, result, done] {
@@ -549,6 +605,11 @@ void Window::render(DocumentPane* p, std::function<void()> done) {
         p->image = result->image; p->canvas->setPixmap(QPixmap::fromImage(p->image)); p->canvas->setFixedSize(p->image.deviceIndependentSize().toSize());
         p->textInventory = std::move(result->inventory); p->canvas->runs = p->textInventory.runs;
         p->canvas->annotations = std::move(result->annotations);
+        p->canvas->fields = std::move(result->fields);
+        if (!p->canvas->fields.empty() && !p->canvas->formPrompted && p->info.editable && p->canvas->tool == TextCanvas::Tool::None && !p->canvas->editMode) {
+            p->canvas->formPrompted = true;
+            for (auto a : tools_) if (a->data().toInt() == static_cast<int>(TextCanvas::Tool::Form) * 100 + static_cast<int>(AnnotationKind::Other)) a->trigger();
+        }
         p->canvas->pageWidth = p->info.pages[page].width; p->canvas->rotation = p->info.pages[page].rotation;
         p->canvas->selected = 0; p->canvas->scale = p->scale; p->canvas->pageHeight = p->info.pages[page].height;
         p->text->setPlainText(result->text); p->canvas->setAccessibleDescription(QString("Page %1. %2 editable text runs. Enable Edit text, use arrow keys to select, and Enter to edit. Extracted text is available in the Page text panel.").arg(page + 1).arg(p->canvas->runs.size()));

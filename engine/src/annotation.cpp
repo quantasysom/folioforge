@@ -86,6 +86,8 @@ std::string ellipse(double x0, double y0, double x1, double y1) {
 }
 }
 
+std::vector<std::string> wrapText(const std::string& text, double fontSize, double maxWidth, const textedit::GlyphFont& font) { return wrap(text, fontSize, maxWidth, font); }
+
 Obj create(QPDF& pdf, const AddAnnotation& request, const std::string& name) {
     const char* type = subtype(request.kind);
     if (!type) throw Error(ErrorCode::Unsupported, "This annotation type cannot be created.");
@@ -205,9 +207,10 @@ bool preservable(Obj annotation) {
     if (!annotation.isDictionary()) return false;
     auto sub = annotation.getKey("/Subtype");
     if (!sub.isName()) return false;
-    static const char* allowed[] = {"/Highlight", "/Underline", "/StrikeOut", "/Squiggly", "/Text", "/FreeText", "/Ink", "/Square", "/Circle", "/Line", "/Polygon", "/PolyLine", "/Stamp", "/Caret", "/Popup", "/FileAttachment"};
+    static const char* allowed[] = {"/Highlight", "/Underline", "/StrikeOut", "/Squiggly", "/Text", "/FreeText", "/Ink", "/Square", "/Circle", "/Line", "/Polygon", "/PolyLine", "/Stamp", "/Caret", "/Popup", "/FileAttachment", "/Widget"};
     bool known = false;
     for (auto name : allowed) known |= sub.getName() == name;
+    if (sub.getName() == "/Widget") return true; // scripts never run
     return known && !annotation.hasKey("/A") && !annotation.hasKey("/AA") && !annotation.hasKey("/Dest");
 }
 

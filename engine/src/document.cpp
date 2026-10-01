@@ -2,6 +2,7 @@
 #include "sfnt.h"
 #include "text_edit.h"
 #include "annotation.h"
+#include "form.h"
 #include <qpdf/QPDF.hh>
 #include <qpdf/QPDFExc.hh>
 #include <qpdf/QPDFPageDocumentHelper.hh>
@@ -68,9 +69,10 @@ std::vector<PageId> idsOf(const std::vector<PageInfo>& pages) {
 std::string restriction(QPDF& pdf) {
     if (pdf.isEncrypted()) return "Encrypted PDFs are read-only in this preview.";
     auto root = pdf.getRoot();
-    for (const char* key : {"/AcroForm", "/Perms", "/StructTreeRoot", "/Outlines", "/Names", "/Dests", "/PageLabels", "/OCProperties", "/OpenAction", "/AA", "/Collection"}) {
+    for (const char* key : {"/Perms", "/StructTreeRoot", "/Outlines", "/Names", "/Dests", "/PageLabels", "/OCProperties", "/OpenAction", "/AA", "/Collection"}) {
         if (root.hasKey(key)) return "This PDF contains forms, navigation, signatures, layers, or document structures whose editing is not yet qualified. Read-only mode preserves the original.";
     }
+    if (auto reason = form::restriction(root); !reason.empty()) return reason;
     for (auto page : QPDFPageDocumentHelper(pdf).getAllPages()) {
         auto object = page.getObjectHandle();
         for (const char* key : {"/AA", "/StructParents", "/B", "/PresSteps"})
@@ -292,12 +294,15 @@ void Document::execute(const Command& command) {
     case CommandKind::RotateRight: selected.rotatePage(90, true); break;
     case CommandKind::InsertBlank:
     case CommandKind::Duplicate: {
+        if (command.kind == CommandKind::Duplicate && form::hasWidgets(selected))
+            throw Error(ErrorCode::Unsupported, "Pages with form fields cannot be duplicated, because the copies would share one field.");
         if (pages.size() >= maxPages) throw Error(ErrorCode::ResourceLimit, "The 10,000-page preview limit has been reached.");
         auto added = command.kind == CommandKind::InsertBlank ? QPDFPageObjectHelper(blank(store.pdf)) : selected.shallowCopyPage();
         helper.addPageAt(added, false, selected);
         ids.insert(ids.begin() + index + 1, nextPage_); break;
     }
     case CommandKind::Delete:
+        if (form::hasWidgets(selected)) throw Error(ErrorCode::Unsupported, "Pages with form fields cannot be deleted yet.");
         if (pages.size() == 1) throw Error(ErrorCode::InvalidSelection, "Keep at least one page in the document.");
         helper.removePage(selected); ids.erase(ids.begin() + index); break;
     case CommandKind::MoveEarlier:
@@ -339,6 +344,10 @@ void Document::insertDocument(const std::filesystem::path& path, PageId after, R
     checkRevision(expected);
     auto incoming = Document::open(path);
     if (!incoming->editable_) throw Error(ErrorCode::Unsupported, incoming->restriction_);
+    {
+        Store probe(incoming->current_.bytes);
+        if (probe.pdf.getRoot().hasKey("/AcroForm")) throw Error(ErrorCode::Unsupported, "Importing pages from a PDF with form fields is not supported.");
+    }
     auto ids = idsOf(current_.pages);
     auto found = std::find(ids.begin(), ids.end(), after);
     if (found == ids.end()) throw Error(ErrorCode::InvalidSelection, "Select a destination page.");
@@ -460,6 +469,30 @@ void Document::removeAnnotation(PageId id, std::uint32_t index, RevisionId expec
     auto metadata = inspect(checked.pdf, ids);
     if (annot::list(QPDFPageDocumentHelper(checked.pdf).getAllPages()[selected - ids.begin()]).size() + 1 != listed.size() || !checked.pdf.getWarnings().empty())
         throw Error(ErrorCode::InvalidDocument, "Annotation removal validation failed. The original document was retained.");
+    commit({std::move(bytes), std::move(metadata), nextIdentity_}); ++nextIdentity_;
+}
+std::vector<FormField> Document::formFields(PageId id) const {
+    auto ids = idsOf(current_.pages);
+    auto selected = std::find(ids.begin(), ids.end(), id);
+    if (selected == ids.end()) throw Error(ErrorCode::InvalidSelection, "The selected page no longer exists.");
+    Store store(current_.bytes);
+    return form::list(QPDFPageDocumentHelper(store.pdf).getAllPages()[selected - ids.begin()]);
+}
+void Document::setFormValue(const SetFormValue& request) {
+    checkRevision(request.expectedRevision);
+    auto ids = idsOf(current_.pages);
+    auto selected = std::find(ids.begin(), ids.end(), request.page);
+    if (selected == ids.end()) throw Error(ErrorCode::InvalidSelection, "The selected page no longer exists.");
+    const auto index = selected - ids.begin();
+    Store store(current_.bytes);
+    form::set(store.pdf, QPDFPageDocumentHelper(store.pdf).getAllPages()[index], request);
+    auto bytes = serialize(store.pdf);
+    Store checked(bytes);
+    auto metadata = inspect(checked.pdf, ids);
+    auto fields = form::list(QPDFPageDocumentHelper(checked.pdf).getAllPages()[index]);
+    if (fields.empty() || !store.pdf.getWarnings().empty() || !checked.pdf.getWarnings().empty()) {
+        throw Error(ErrorCode::InvalidDocument, "Form validation failed. The original document was retained.");
+    }
     commit({std::move(bytes), std::move(metadata), nextIdentity_}); ++nextIdentity_;
 }
 void Document::setFallbackFonts(const std::vector<std::filesystem::path>& paths) {

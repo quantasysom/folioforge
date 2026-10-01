@@ -44,7 +44,9 @@ platform validation limits. Outputs go to `dist/<OS>` with SHA-256 checksums.
 | Export | Current page to PNG at 144 DPI; whole-document text to UTF-8 |
 | CLI | New, inspect, text, rotate, merge, JPEG-to-PDF (`image`); output collision protection |
 
-Annotations (highlight, underline, strike-out, rectangle, ellipse, pen, sticky note, text box) can be added, selected and removed from the Annotate menu; each is written with a normal appearance stream, so other viewers show it. Existing passive markup annotations are preserved untouched (only annotations created by FolioForge can be removed). Text-box annotations support printable ASCII. PDFs with encryption, parser repairs, links, forms, signatures, navigation trees, tagged structures, layers, or selected document actions are conservatively read-only. The UI explains the restriction. Encryption passwords are not saved. No PDF scripting or form-action API is called.
+Annotations (highlight, underline, strike-out, rectangle, ellipse, pen, sticky note, text box) can be added, selected and removed from the Annotate menu; each is written with a normal appearance stream, so other viewers show it. Existing passive markup annotations are preserved untouched (only annotations created by FolioForge can be removed). Text-box annotations support printable ASCII. PDFs with encryption, parser repairs, links, signed forms, navigation trees, tagged structures, layers, or selected document actions are conservatively read-only. The UI explains the restriction.
+
+Forms: AcroForm text, check box, radio and drop-down/list fields can be filled with **Annotate → Fill form** (auto-selected when a page has fields). Values are written to the field and every widget gets a regenerated appearance stream, so other viewers show them. Text fields use the field's own font, so non-ASCII text is accepted only when that font has the glyphs (the standard Helvetica form font is ASCII-only). Scripts and calculations are never run, signature fields are untouched, and push buttons, rich-text, multi-select and XFA fields are not editable. PDFs that carry a digital signature, `/SigFlags` append-only, or XFA stay read-only. Pages with form fields cannot be duplicated or deleted, and PDFs with forms cannot be inserted from. Encryption passwords are not saved. No PDF scripting or form-action API is called.
 
 ```powershell
 ./build/gui/pdfeditor-cli.exe new output.pdf
@@ -76,7 +78,7 @@ See [implementation status](docs/implementation-status.md), [ownership ADR](docs
 
 ## Limits of this preview
 
-Arbitrary text/paragraph editing, new page text/images, annotation editing (move/resize/recolor), forms, signing, redaction, OCR, printing, outline navigation, page-range extraction/splitting, recovery, a thumbnail organization grid, and cancellable jobs are not implemented. Rendering uses one page at a time; thumbnails are populated when pages are visited. Search lists matching pages and does not highlight glyphs on the canvas.
+Arbitrary text/paragraph editing, new page text/images, annotation editing (move/resize/recolor), form creation and scripted forms, signing, redaction, OCR, printing, outline navigation, page-range extraction/splitting, recovery, a thumbnail organization grid, and cancellable jobs are not implemented. Rendering uses one page at a time; thumbnails are populated when pages are visited. Search lists matching pages and does not highlight glyphs on the canvas.
 
 The parser and renderer currently run in-process. The supplied PDFium binary has V8/XFA compiled in; hardened builds and isolated workers remain release prerequisites. Input/snapshots are limited to 256 MiB, documents to 10,000 pages, and rasters to 32 megapixels. These bounds do not provide full protection against malicious decoded streams or expensive PDFs. Large-file and cross-platform qualification is outstanding.
 
