@@ -128,7 +128,7 @@ DocumentPane::DocumentPane(QWidget* parent) : QWidget(parent) {
     canvas = new TextCanvas("Opening document…"); canvas->setAlignment(Qt::AlignCenter); canvas->setAccessibleName("Rendered PDF page");
     canvas->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed); stageLayout->addWidget(canvas, 0, Qt::AlignCenter);
     scroll->setWidget(stage); split->addWidget(scroll);
-    auto inspector = new QWidget; inspector->setMinimumWidth(210); auto propertiesLayout = new QVBoxLayout(inspector);
+    inspector = new QWidget; inspector->setMinimumWidth(210); auto propertiesLayout = new QVBoxLayout(inspector);
     auto title = new QLabel("Page properties"); QFont heading = title->font(); heading.setPointSize(12); heading.setBold(true); title->setFont(heading);
     properties = new QLabel; properties->setWordWrap(true); properties->setTextInteractionFlags(Qt::TextSelectableByMouse);
     text = new QPlainTextEdit; text->setReadOnly(true); text->setPlaceholderText("Extracted page text appears here."); text->setAccessibleName("Accessible extracted page text");
@@ -282,6 +282,15 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
         } else p->scale = value.chopped(1).toDouble() / 100.0;
         render(p);
     });
+    propertiesToggle_ = action(view, "Page properties panel", QKeySequence("Ctrl+Alt+I"), [this] {
+        const bool show = propertiesToggle_->isChecked(); QSettings().setValue("showProperties", show);
+        for (int i = 0; i < tabs_->count(); ++i) if (auto p = dynamic_cast<DocumentPane*>(tabs_->widget(i))) p->inspector->setVisible(show);
+    });
+    propertiesToggle_->setCheckable(true); propertiesToggle_->setChecked(smoke_ || QSettings().value("showProperties", true).toBool());
+    {
+        auto b = new QToolButton; b->setDefaultAction(propertiesToggle_); b->setText("Properties"); b->setToolButtonStyle(Qt::ToolButtonTextOnly); b->setAutoRaise(true);
+        b->setToolTip("Show or hide the page properties panel (Ctrl+Alt+I)"); statusBar()->addPermanentWidget(b);
+    }
     auto stepZoom = [this](double factor) {
         auto p = active(); if (!p || p->busy || p->info.pages.empty()) return;
         p->scale = std::clamp(p->scale * factor, 0.05, 4.0); render(p);
@@ -466,6 +475,7 @@ int Window::advanceSmokeTest() {
 }
 DocumentPane* Window::addPane(const QString& title) {
     auto p = new DocumentPane; tabs_->setCurrentIndex(tabs_->addTab(p, title));
+    if (propertiesToggle_) p->inspector->setVisible(propertiesToggle_->isChecked());
     connect(p->pages, &QListWidget::currentRowChanged, this, [this, p](int row) { if (row >= 0 && !p->busy && !p->canvas->editing()) { p->currentPage = row; render(p); } });
     auto showComment = [this, p](QListWidgetItem* item) {
         if (!item || !item->data(Qt::UserRole).isValid() || p->busy) return;
