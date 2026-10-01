@@ -57,6 +57,7 @@ private:
     QAction *save_{}, *saveAs_{}, *undo_{}, *redo_{}, *delete_{}, *insert_{}, *merge_{}, *insertImage_{}, *duplicate_{},
             *left_{}, *right_{}, *earlier_{}, *later_{}, *exportImage_{}, *exportText_{}, *find_{}, *editText_{}, *applyText_{}, *cancelText_{};
     std::vector<QAction*> tools_;
+    QToolButton *zoomInButton_{}, *zoomOutButton_{};
     QAction *zoomIn_{}, *zoomOut_{}, *applyRedactions_{}, *signAction_{}, *deleteAnnotation_{}, *annotationColor_{};
     pdfengine::AnnotationKind toolKind_{pdfengine::AnnotationKind::Highlight};
     std::optional<QColor> customColor_;

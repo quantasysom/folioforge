@@ -268,7 +268,10 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
     auto next = action(view, "Next page", QKeySequence("Alt+Down"), [this] { auto p = active(); if (p && !p->busy && !p->canvas->editing()) p->pages->setCurrentRow(std::min(p->pages->count() - 1, p->currentPage + 1)); });
     toolbar->addAction(prev); toolbar->addAction(next);
     zoom_ = new QComboBox; zoom_->addItems({"50%", "75%", "100%", "125%", "150%", "200%", "Fit width", "Fit page"}); zoom_->setCurrentText("100%");
-    zoom_->setAccessibleName("Page zoom"); toolbar->addWidget(zoom_);
+    zoom_->setAccessibleName("Page zoom"); zoom_->setEditable(true); zoom_->lineEdit()->setReadOnly(true); zoom_->lineEdit()->setAlignment(Qt::AlignCenter); zoom_->setInsertPolicy(QComboBox::NoInsert);
+    zoomOutButton_ = new QToolButton; zoomOutButton_->setText("−"); zoomOutButton_->setToolTip("Zoom out (Ctrl+−)"); zoomOutButton_->setAutoRaise(true);
+    zoomInButton_ = new QToolButton; zoomInButton_->setText("+"); zoomInButton_->setToolTip("Zoom in (Ctrl++)"); zoomInButton_->setAutoRaise(true);
+    toolbar->addWidget(zoomOutButton_); toolbar->addWidget(zoom_); toolbar->addWidget(zoomInButton_);
     connect(zoom_, &QComboBox::textActivated, this, [this](const QString& value) {
         auto p = active(); if (!p || p->busy || p->info.pages.empty()) return;
         auto size = p->info.pages[p->currentPage]; double w = size.width, h = size.height; if (size.rotation % 180) std::swap(w, h);
@@ -285,10 +288,7 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
     };
     zoomOut_ = action(view, "Zoom out", QKeySequence::ZoomOut, [stepZoom] { stepZoom(1 / 1.25); });
     zoomIn_ = action(view, "Zoom in", QKeySequence::ZoomIn, [stepZoom] { stepZoom(1.25); });
-    for (auto a : {zoomOut_, zoomIn_}) {
-        auto b = new QToolButton; b->setDefaultAction(a); b->setText(a == zoomIn_ ? "+" : "−"); b->setToolButtonStyle(Qt::ToolButtonTextOnly); b->setAutoRaise(true);
-        b->setToolTip(a == zoomIn_ ? "Zoom in (Ctrl++)" : "Zoom out (Ctrl+−)"); b->setMinimumWidth(28); statusBar()->addPermanentWidget(b);
-    }
+    connect(zoomOutButton_, &QToolButton::clicked, zoomOut_, &QAction::trigger); connect(zoomInButton_, &QToolButton::clicked, zoomIn_, &QAction::trigger);
     action(help, "About FolioForge", {}, [this] { QMessageBox::about(this, "FolioForge 0.1", "A local PDF reader and page-tool preview.\n\nC++20 · Qt 6 · QPDF · PDFium\n\nAdvanced editing and release hardening remain in development."); });
     auto welcome = new QWidget; auto layout = new QVBoxLayout(welcome); layout->setAlignment(Qt::AlignCenter);
     auto brand = new QLabel("FolioForge"); QFont font = brand->font(); font.setPointSize(30); font.setBold(true); brand->setFont(font); brand->setAlignment(Qt::AlignCenter);
@@ -845,7 +845,7 @@ void Window::updateActions() {
     deleteAnnotation_->setEnabled(editable && p->canvas->selectedAnnotation >= 0);
     if (p) for (auto a : tools_) { QSignalBlocker block(a); a->setChecked(p->canvas->tool != TextCanvas::Tool::None && a->data().toInt() == static_cast<int>(p->canvas->tool) * 100 + static_cast<int>(toolKind_)); }
     for (auto a : {exportImage_, exportText_, find_}) a->setEnabled(ready);
-    zoom_->setEnabled(ready); if (zoomIn_) { zoomIn_->setEnabled(ready); zoomOut_->setEnabled(ready); }
+    zoom_->setEnabled(ready); if (zoomIn_) { zoomIn_->setEnabled(ready); zoomOut_->setEnabled(ready); zoomInButton_->setEnabled(ready); zoomOutButton_->setEnabled(ready); }
     if (ready) zoom_->setCurrentText(QString("%1%").arg(qRound(p->scale * 100)));
 }
 void Window::command(CommandKind kind) {
