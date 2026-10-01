@@ -55,7 +55,7 @@ private:
     QAction *save_{}, *saveAs_{}, *undo_{}, *redo_{}, *delete_{}, *insert_{}, *merge_{}, *insertImage_{}, *duplicate_{},
             *left_{}, *right_{}, *earlier_{}, *later_{}, *exportImage_{}, *exportText_{}, *find_{}, *editText_{}, *applyText_{}, *cancelText_{};
     std::vector<QAction*> tools_;
-    QAction *signAction_{}, *deleteAnnotation_{}, *annotationColor_{};
+    QAction *applyRedactions_{}, *signAction_{}, *deleteAnnotation_{}, *annotationColor_{};
     pdfengine::AnnotationKind toolKind_{pdfengine::AnnotationKind::Highlight};
     std::optional<QColor> customColor_;
     bool smoke_{}, hadError_{};
@@ -76,6 +76,7 @@ private:
     void selectTool(DocumentPane*, QAction*);
     std::array<double, 3> annotationRgb() const;
     void placeAnnotation(DocumentPane*, pdfengine::AddAnnotation);
+    void applyRedactions(DocumentPane*);
     void signDocument(DocumentPane*);
     void editAnnotation(DocumentPane*, std::function<void(pdfengine::AddAnnotation&)>);
     void removeSelectedAnnotation(DocumentPane*);

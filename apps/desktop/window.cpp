@@ -7,6 +7,7 @@
 #include <QtConcurrent/QtConcurrentRun>
 #include <QFutureWatcher>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 using namespace pdfengine;
@@ -203,7 +204,8 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
         {"Note", AnnotationKind::Note, TextCanvas::Tool::Point, "Click to place a sticky note"},
         {"Text box", AnnotationKind::FreeText, TextCanvas::Tool::Area, "Drag a box, then type the text to place"},
         {"Select", AnnotationKind::Other, TextCanvas::Tool::Select, "Click an annotation to select it"},
-        {"Fill form", AnnotationKind::Other, TextCanvas::Tool::Form, "Click a form field to fill it. Scripts are not run; signature fields are untouched."}};
+        {"Fill form", AnnotationKind::Other, TextCanvas::Tool::Form, "Click a form field to fill it. Scripts are not run; signature fields are untouched."},
+        {"Redact", AnnotationKind::Other, TextCanvas::Tool::Redact, "Drag boxes over content to remove, then choose Apply redactions"}};
     for (const auto& spec : specs) {
         auto a = new QAction(spec.label, this); a->setCheckable(true); a->setToolTip(spec.tip); a->setStatusTip(spec.tip);
         a->setData(QVariant::fromValue<int>(static_cast<int>(spec.tool) * 100 + static_cast<int>(spec.kind)));
@@ -220,6 +222,8 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
         auto chosen = QColorDialog::getColor(customColor_.value_or(QColor(255, 224, 0)), this, "Annotation color");
         if (chosen.isValid()) editAnnotation(p, [chosen](AddAnnotation& r) { r.color = {chosen.redF(), chosen.greenF(), chosen.blueF()}; });
     });
+    applyRedactions_ = action(annotate, "Apply redactions…", {}, [this] { applyRedactions(active()); });
+    action(annotate, "Clear pending redactions", {}, [this] { if (auto p = active()) { p->canvas->redactions.clear(); p->canvas->update(); } });
     deleteAnnotation_ = action(annotate, "Delete selected annotation", {}, [this] { removeSelectedAnnotation(active()); });
     annotationBar->addSeparator(); annotationBar->addAction(annotationColor_); annotationBar->addAction(deleteAnnotation_);
     auto organize = addToolBar("Organize pages"); organize->setMovable(false); addToolBarBreak(); addToolBar(Qt::TopToolBarArea, organize);
@@ -429,6 +433,12 @@ int Window::advanceSmokeTest() {
         break;
     case 22:
         if (p->info.pages.size() != 3 || !tabs_->tabText(tabs_->currentIndex()).startsWith("Merged.pdf")) return -1;
+        p->canvas->redactionPage = p->info.pages[p->currentPage].id; p->canvas->redactionRevision = p->info.revision;
+        p->canvas->redactions.emplace_back(QPointF(0, 0), QPointF(100, 100));
+        applyRedactions(p);
+        break;
+    case 23:
+        if (p->info.pages.size() != 3 || !p->info.canUndo || !p->canvas->redactions.empty()) return -1;
         return 1;
 #else
         return 1;
@@ -454,6 +464,12 @@ DocumentPane* Window::addPane(const QString& title) {
             }
         }
         placeAnnotation(p, request);
+    };
+    p->canvas->redactionDrawn = [this, p](QPointF a, QPointF b) {
+        if (p->busy || !p->info.editable) return;
+        if (std::abs(a.x() - b.x()) < 2 || std::abs(a.y() - b.y()) < 2) return;
+        p->canvas->redactionPage = p->info.pages[p->currentPage].id; p->canvas->redactionRevision = p->info.revision;
+        p->canvas->redactions.emplace_back(a, b); p->canvas->update(); updateActions();
     };
     p->canvas->strokeDrawn = [this, p](std::vector<std::vector<QPointF>> strokes) {
         AddAnnotation request; request.kind = AnnotationKind::Ink; request.lineWidth = 2.5;
@@ -570,6 +586,29 @@ void Window::placeAnnotation(DocumentPane* p, AddAnnotation request) {
     if (!p || p->busy || !p->document || !p->info.editable) return;
     request.page = p->info.pages[p->currentPage].id; request.expectedRevision = p->info.revision; request.color = annotationRgb();
     run(p, "Adding annotation", [p, request] { p->document->addAnnotation(request); }, [this, p] { render(p); });
+}
+void Window::applyRedactions(DocumentPane* p) {
+    if (!p || p->busy || !p->document || !p->info.editable || p->canvas->redactions.empty()) return;
+    if (!smoke_ && QMessageBox::warning(this, "Apply redactions",
+            "This page will be flattened into a picture with the marked areas blacked out. All text, links, notes and form data on the page are removed and cannot be selected afterwards.\n\nYou can undo until you save. Continue?",
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
+    const auto& info = p->info.pages[p->currentPage];
+    const bool turned = info.rotation == 90 || info.rotation == 270;
+    const double pageW = turned ? info.height : info.width, pageH = turned ? info.width : info.height;
+    const double scale = std::min(200.0 / 72.0, std::sqrt(40e6 / (pageW * pageH)));
+    const double zoom = scale / p->canvas->scale;
+    std::vector<QRectF> boxes;
+    for (const auto& box : p->canvas->redactions) boxes.push_back(QRectF(p->canvas->toView(box.first) * zoom, p->canvas->toView(box.second) * zoom).normalized());
+    auto snapshot = p->document->snapshot(); int page = p->currentPage; auto id = info.id; auto revision = p->info.revision;
+    p->canvas->redactions.clear(); p->canvas->update();
+    run(p, "Redacting", [p, snapshot, page, id, revision, scale, boxes, renderer = renderer_] {
+        auto image = imageOf(renderer->render(snapshot, page, scale)).convertToFormat(QImage::Format_RGB888);
+        { QPainter painter(&image); for (const auto& box : boxes) painter.fillRect(box, Qt::black); }
+        ImagePage raster; raster.width = image.width(); raster.height = image.height(); raster.components = 3;
+        raster.data.reserve(static_cast<std::size_t>(image.width()) * image.height() * 3);
+        for (int y = 0; y < image.height(); ++y) { auto line = image.constScanLine(y); raster.data.insert(raster.data.end(), line, line + image.width() * 3); }
+        p->document->redactPage(id, revision, raster);
+    }, [this, p] { render(p); });
 }
 void Window::signDocument(DocumentPane* p) {
     if (!p || p->busy || !p->document || !p->info.editable) return;
@@ -708,6 +747,7 @@ void Window::render(DocumentPane* p, std::function<void()> done) {
         p->image = result->image; p->canvas->setPixmap(QPixmap::fromImage(p->image)); p->canvas->setFixedSize(p->image.deviceIndependentSize().toSize());
         p->textInventory = std::move(result->inventory); p->canvas->runs = p->textInventory.runs;
         p->canvas->annotations = std::move(result->annotations);
+        if (p->canvas->redactionPage != p->info.pages[page].id || p->canvas->redactionRevision != p->info.revision) p->canvas->redactions.clear();
         p->canvas->fields = std::move(result->fields);
         if (!p->canvas->fields.empty() && !p->canvas->formPrompted && p->info.editable && p->canvas->tool == TextCanvas::Tool::None && !p->canvas->editMode) {
             p->canvas->formPrompted = true;
@@ -742,6 +782,7 @@ void Window::updateActions() {
     for (auto a : tools_) a->setEnabled(editable);
     annotationColor_->setEnabled(editable);
     signAction_->setEnabled(editable);
+    applyRedactions_->setEnabled(editable && !p->canvas->redactions.empty());
     deleteAnnotation_->setEnabled(editable && p->canvas->selectedAnnotation >= 0);
     if (p) for (auto a : tools_) { QSignalBlocker block(a); a->setChecked(p->canvas->tool != TextCanvas::Tool::None && a->data().toInt() == static_cast<int>(p->canvas->tool) * 100 + static_cast<int>(toolKind_)); }
     for (auto a : {exportImage_, exportText_, find_}) a->setEnabled(ready);

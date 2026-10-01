@@ -152,6 +152,10 @@ public:
     // TrueType (.ttf) fonts tried, in order, before installed system fonts when an edit needs characters the
     // run's own font lacks. Throws Error(Unsupported) if a file cannot be embedded.
     void setFallbackFonts(const std::vector<std::filesystem::path>&);
+    // Irreversibly redacts a page by replacing it with a flattened picture of itself (the caller renders the page
+    // and paints the redaction boxes into `raster`, 8-bit RGB). All text, vectors, images, annotations and links
+    // on the page are discarded, so nothing under the boxes can be recovered. Page identity and size are kept.
+    void redactPage(PageId, RevisionId expected, const ImagePage& raster);
     // Writes a signed copy (invisible signature, incremental update) to a new file. The open document is unchanged.
     void signTo(const std::filesystem::path& output, const SignOptions&, bool overwrite = false);
     // Call renderer validation on snapshot() before saving. Saving revalidates QPDF structure.

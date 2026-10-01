@@ -36,14 +36,16 @@ public:
     double scale{1}, pageHeight{}, pageWidth{};
     int rotation{};
     // Annotation tool: None does nothing, Area drags a rectangle, Pen draws freehand, Point places at a click, Select picks an annotation.
-    enum class Tool { None, Area, Pen, Point, Select, Form } tool{Tool::None};
+    enum class Tool { None, Area, Pen, Point, Select, Form, Redact } tool{Tool::None};
     std::vector<pdfengine::FormField> fields;
     bool formPrompted{};
     std::function<void(int)> fieldClicked;
     std::vector<pdfengine::Annotation> annotations;
     int selectedAnnotation{-1};
     bool movingAnnotation{false};
-    std::function<void(QPointF, QPointF)> areaDrawn;
+    std::function<void(QPointF, QPointF)> areaDrawn, redactionDrawn;
+    std::vector<std::pair<QPointF, QPointF>> redactions;   // Pending boxes in PDF points, burned in when applied.
+    std::uint64_t redactionPage{}, redactionRevision{};
     std::function<void(std::vector<std::vector<QPointF>>)> strokeDrawn;
     std::function<void(QPointF)> pointPicked;
     std::function<void(int)> annotationSelected;
@@ -119,7 +121,11 @@ protected:
                 if (movingAnnotation) box.translate(dragEnd - dragStart);
                 overlay.drawRect(box);
             }
-            if (dragging && tool == Tool::Area) {
+            for (const auto& box : redactions) {
+                overlay.setPen(QPen(QColor(200, 0, 0), 1.5)); overlay.setBrush(QColor(0, 0, 0, 170));
+                overlay.drawRect(QRectF(toView(box.first), toView(box.second)).normalized());
+            }
+            if (dragging && (tool == Tool::Area || tool == Tool::Redact)) {
                 overlay.setPen(QPen(QColor("#1769E8"), 1, Qt::DashLine)); overlay.setBrush(QColor(23, 105, 232, 30));
                 overlay.drawRect(QRectF(dragStart, dragEnd).normalized());
             } else if (dragging && tool == Tool::Pen) {
@@ -183,6 +189,7 @@ protected:
         if (dragging && event->button() == Qt::LeftButton) {
             dragging = false; dragEnd = event->position(); update();
             if (tool == Tool::Area && areaDrawn) areaDrawn(toPdf(dragStart), toPdf(dragEnd));
+            else if (tool == Tool::Redact && redactionDrawn) redactionDrawn(toPdf(dragStart), toPdf(dragEnd));
             else if (tool == Tool::Pen && strokeDrawn) {
                 std::vector<QPointF> stroke; for (const auto& point : currentStroke) stroke.push_back(toPdf(point));
                 strokeDrawn({std::move(stroke)});

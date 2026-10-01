@@ -421,6 +421,38 @@ void Document::insertImage(const ImagePage& image, PageId after, RevisionId expe
     commit({std::move(bytes), std::move(metadata), nextIdentity_});
     ++nextIdentity_; ++nextPage_;
 }
+void Document::redactPage(PageId id, RevisionId expected, const ImagePage& raster) {
+    checkRevision(expected);
+    auto ids = idsOf(current_.pages);
+    auto found = std::find(ids.begin(), ids.end(), id);
+    if (found == ids.end()) throw Error(ErrorCode::InvalidSelection, "The selected page no longer exists.");
+    const auto index = static_cast<std::size_t>(found - ids.begin());
+    if (raster.jpeg || raster.components != 3) throw Error(ErrorCode::Unsupported, "Redaction needs an RGB raster of the page.");
+    Store store(current_.bytes);
+    QPDFPageDocumentHelper helper(store.pdf);
+    auto old = helper.getAllPages()[index];
+    if (form::hasWidgets(old)) throw Error(ErrorCode::Unsupported, "Pages with form fields cannot be redacted yet.");
+    const auto& info = current_.pages[index];
+    const bool turned = info.rotation == 90 || info.rotation == 270;
+    const double width = turned ? info.height : info.width, height = turned ? info.width : info.height;
+    // The raster must match the page's aspect ratio so the redaction boxes land where the user drew them.
+    if (raster.width == 0 || raster.height == 0 || std::abs(static_cast<double>(raster.width) / raster.height - width / height) > 0.02 * width / height)
+        throw Error(ErrorCode::InvalidSelection, "The redaction raster does not match the page shape.");
+    auto replacement = QPDFPageObjectHelper(imagePage(store.pdf, raster));
+    auto dict = replacement.getObjectHandle();
+    dict.replaceKey("/MediaBox", Obj::newArray(Obj::Rectangle(0, 0, width, height)));
+    std::ostringstream content; content.imbue(std::locale::classic()); content << std::fixed << std::setprecision(4);
+    content << "q " << width << " 0 0 " << height << " 0 0 cm /Im0 Do Q\n";
+    dict.replaceKey("/Contents", store.pdf.newStream(content.str()));
+    helper.addPageAt(replacement, false, old);
+    helper.removePage(old);
+    auto bytes = serialize(store.pdf);
+    Store checked(bytes);
+    auto metadata = inspect(checked.pdf, ids);
+    if (!store.pdf.getWarnings().empty() || !checked.pdf.getWarnings().empty())
+        throw Error(ErrorCode::InvalidDocument, "Redaction produced PDF warnings and was rolled back.");
+    commit({std::move(bytes), std::move(metadata), nextIdentity_}); ++nextIdentity_;
+}
 void Document::save(const std::filesystem::path& path, bool overwrite) {
     if (!editable_) throw Error(ErrorCode::Unsupported, restriction_);
     auto target = std::filesystem::absolute(path).lexically_normal();
