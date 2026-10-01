@@ -72,7 +72,7 @@ std::vector<PageId> idsOf(const std::vector<PageInfo>& pages) {
 std::string restriction(QPDF& pdf) {
     if (pdf.isEncrypted()) return "Encrypted PDFs are read-only in this preview.";
     auto root = pdf.getRoot();
-    for (const char* key : {"/Perms", "/StructTreeRoot", "/Outlines", "/Names", "/Dests", "/PageLabels", "/OCProperties", "/OpenAction", "/AA", "/Collection"}) {
+    for (const char* key : {"/Perms", "/StructTreeRoot", "/Outlines", "/Names", "/Dests", "/PageLabels", "/OpenAction", "/AA", "/Collection"}) {
         if (root.hasKey(key)) return "This PDF contains forms, navigation, signatures, layers, or document structures whose editing is not yet qualified. Read-only mode preserves the original.";
     }
     if (auto reason = form::restriction(root); !reason.empty()) return reason;
