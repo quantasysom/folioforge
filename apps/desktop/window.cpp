@@ -106,7 +106,8 @@ QString exportPath(QWidget* parent, const QString& title, const QString& suffix,
 }
 DocumentPane::DocumentPane(QWidget* parent) : QWidget(parent) {
     auto outer = new QVBoxLayout(this); outer->setContentsMargins(0, 0, 0, 0); outer->setSpacing(0);
-    notice = new QLabel; notice->setWordWrap(true); notice->setMargin(10); notice->hide();
+    notice = new QLabel; notice->setWordWrap(true); notice->setMargin(6); notice->hide();
+    notice->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
     notice->setStyleSheet("background:#FFF5D8;color:#664500;"); outer->addWidget(notice);
     auto split = new QSplitter; outer->addWidget(split);
     auto navigation = new QTabWidget; navigation->setMinimumWidth(180);
@@ -116,6 +117,10 @@ DocumentPane::DocumentPane(QWidget* parent) : QWidget(parent) {
     query = new QLineEdit; query->setPlaceholderText("Search text, then press Enter"); query->setAccessibleName("Find in document");
     matches = new QListWidget; matches->setWordWrap(true); matches->setAccessibleName("Search results");
     searchLayout->addWidget(query); searchLayout->addWidget(matches); navigation->addTab(searchPane, "Search");
+    auto commentsPane = new QWidget; auto commentsLayout = new QVBoxLayout(commentsPane);
+    addComment = new QPushButton("Add comment (sticky note)");
+    comments = new QListWidget; comments->setWordWrap(true); comments->setAccessibleName("Comments and annotations");
+    commentsLayout->addWidget(addComment); commentsLayout->addWidget(comments); navigation->addTab(commentsPane, "Comments");
     split->addWidget(navigation);
     scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setAlignment(Qt::AlignCenter);
     scroll->setStyleSheet("QScrollArea {background:#E8ECF2;border:0;} QScrollArea > QWidget > QWidget {background:#E8ECF2;}");
@@ -274,6 +279,16 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
         } else p->scale = value.chopped(1).toDouble() / 100.0;
         render(p);
     });
+    auto stepZoom = [this](double factor) {
+        auto p = active(); if (!p || p->busy || p->info.pages.empty()) return;
+        p->scale = std::clamp(p->scale * factor, 0.05, 4.0); render(p);
+    };
+    zoomOut_ = action(view, "Zoom out", QKeySequence::ZoomOut, [stepZoom] { stepZoom(1 / 1.25); });
+    zoomIn_ = action(view, "Zoom in", QKeySequence::ZoomIn, [stepZoom] { stepZoom(1.25); });
+    for (auto a : {zoomOut_, zoomIn_}) {
+        auto b = new QToolButton; b->setDefaultAction(a); b->setText(a == zoomIn_ ? "+" : "−"); b->setToolButtonStyle(Qt::ToolButtonTextOnly); b->setAutoRaise(true);
+        b->setToolTip(a == zoomIn_ ? "Zoom in (Ctrl++)" : "Zoom out (Ctrl+−)"); b->setMinimumWidth(28); statusBar()->addPermanentWidget(b);
+    }
     action(help, "About FolioForge", {}, [this] { QMessageBox::about(this, "FolioForge 0.1", "A local PDF reader and page-tool preview.\n\nC++20 · Qt 6 · QPDF · PDFium\n\nAdvanced editing and release hardening remain in development."); });
     auto welcome = new QWidget; auto layout = new QVBoxLayout(welcome); layout->setAlignment(Qt::AlignCenter);
     auto brand = new QLabel("FolioForge"); QFont font = brand->font(); font.setPointSize(30); font.setBold(true); brand->setFont(font); brand->setAlignment(Qt::AlignCenter);
@@ -452,6 +467,12 @@ int Window::advanceSmokeTest() {
 DocumentPane* Window::addPane(const QString& title) {
     auto p = new DocumentPane; tabs_->setCurrentIndex(tabs_->addTab(p, title));
     connect(p->pages, &QListWidget::currentRowChanged, this, [this, p](int row) { if (row >= 0 && !p->busy && !p->canvas->editing()) { p->currentPage = row; render(p); } });
+    connect(p->comments, &QListWidget::itemActivated, this, [p](QListWidgetItem* item) { auto page = item->data(Qt::UserRole); if (page.isValid()) p->pages->setCurrentRow(page.toInt()); });
+    connect(p->comments, &QListWidget::itemClicked, this, [p](QListWidgetItem* item) { auto page = item->data(Qt::UserRole); if (page.isValid()) p->pages->setCurrentRow(page.toInt()); });
+    connect(p->addComment, &QPushButton::clicked, this, [this] {
+        for (auto a : tools_) if (a->text() == "Note" && a->isEnabled()) { a->trigger(); statusBar()->showMessage("Click on the page to place a comment"); return; }
+        statusBar()->showMessage("This document is read-only, so comments can't be added.");
+    });
     p->canvas->editRequested = [this, p](int index) { beginTextEdit(p, index); };
     p->canvas->areaDrawn = [this, p](QPointF a, QPointF b) {
         if (p->busy) return;
@@ -717,11 +738,29 @@ void Window::refresh(DocumentPane* p) {
         p->pages->setProperty("revision", QVariant::fromValue<qulonglong>(p->info.revision));
         p->matches->clear();
     }
+    if (p->comments->property("revision").toULongLong() != p->info.revision || !p->comments->property("built").toBool()) {
+        p->comments->clear();
+        static const char* names[] = {"Highlight", "Underline", "Strike-out", "Note", "Text box", "Pen", "Rectangle", "Ellipse", "Annotation"};
+        for (std::size_t i = 0; i < p->info.pages.size(); ++i) {
+            std::vector<Annotation> found;
+            try { found = p->document->annotations(p->info.pages[i].id); } catch (const std::exception&) {}
+            for (const auto& a : found) {
+                auto text = QString::fromStdString(a.contents).trimmed();
+                if (text.isEmpty() && a.kind != AnnotationKind::Note && a.kind != AnnotationKind::FreeText) continue;
+                auto item = new QListWidgetItem(QString("Page %1 · %2\n%3").arg(i + 1).arg(names[static_cast<int>(a.kind)]).arg(text.isEmpty() ? "(no text)" : text));
+                item->setData(Qt::UserRole, static_cast<int>(i)); p->comments->addItem(item);
+            }
+        }
+        if (!p->comments->count()) { auto item = new QListWidgetItem("No comments yet. Use “Add comment” or the Note tool."); item->setFlags(Qt::NoItemFlags); p->comments->addItem(item); }
+        p->comments->setProperty("revision", QVariant::fromValue<qulonglong>(p->info.revision)); p->comments->setProperty("built", true);
+    }
     p->pages->setCurrentRow(p->currentPage);
     auto suggested = p->property("suggestedName").toString();
     auto name = p->info.path.empty() ? (suggested.isEmpty() ? "Untitled.pdf" : suggested) : QFileInfo(displayPath(p->info.path)).fileName();
     tabs_->setTabText(tabs_->indexOf(p), name + (p->info.dirty ? " *" : ""));
     QString notice = QString::fromStdString(p->info.restriction);
+    p->notice->setToolTip(notice);
+    if (notice.startsWith("This PDF contains")) notice = "Read-only: this PDF has forms, bookmarks, signatures, layers or similar structures that can't be safely edited yet. You can still read and search it. Hover for details.";
     if (p->info.historyPruned) notice += " Older undo history was discarded to stay within the memory budget.";
     p->notice->setText(notice); p->notice->setVisible(!notice.isEmpty());
     const auto& page = p->info.pages[p->currentPage];
@@ -787,7 +826,7 @@ void Window::updateActions() {
     deleteAnnotation_->setEnabled(editable && p->canvas->selectedAnnotation >= 0);
     if (p) for (auto a : tools_) { QSignalBlocker block(a); a->setChecked(p->canvas->tool != TextCanvas::Tool::None && a->data().toInt() == static_cast<int>(p->canvas->tool) * 100 + static_cast<int>(toolKind_)); }
     for (auto a : {exportImage_, exportText_, find_}) a->setEnabled(ready);
-    zoom_->setEnabled(ready);
+    zoom_->setEnabled(ready); if (zoomIn_) { zoomIn_->setEnabled(ready); zoomOut_->setEnabled(ready); }
     if (ready) zoom_->setCurrentText(QString("%1%").arg(qRound(p->scale * 100)));
 }
 void Window::command(CommandKind kind) {
