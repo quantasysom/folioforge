@@ -3,6 +3,7 @@
 #include "text_edit.h"
 #include "annotation.h"
 #include "form.h"
+#include "signing.h"
 #include <qpdf/QPDF.hh>
 #include <qpdf/QPDFExc.hh>
 #include <qpdf/QPDFPageDocumentHelper.hh>
@@ -14,6 +15,7 @@
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <iostream>
 #include <random>
 #include <locale>
 #include <sstream>
@@ -431,6 +433,16 @@ void Document::save(const std::filesystem::path& path, bool overwrite) {
     atomicWrite(target, *current_.bytes, overwrite || same, same ? sourceBytes_.get() : nullptr);
     path_ = std::move(target); sourceBytes_ = current_.bytes; savedIdentity_ = current_.identity;
 }
+void Document::signTo(const std::filesystem::path& output, const SignOptions& options, bool overwrite) {
+    if (!editable_) throw Error(ErrorCode::Unsupported, "This document cannot be signed: " + restriction_);
+    Store checked(current_.bytes);
+    if (!checked.pdf.getWarnings().empty()) throw Error(ErrorCode::SaveFailed, "PDF validation failed. Nothing was signed.");
+    auto signedBytes = signing::sign(*current_.bytes, options);
+    Store reread(std::make_shared<const Bytes>(signedBytes));
+    if (!reread.pdf.getWarnings().empty() || !QPDFPageDocumentHelper(reread.pdf).getAllPages().size()) throw Error(ErrorCode::SaveFailed, "The signed file failed validation. Nothing was written.");
+    atomicWrite(std::filesystem::absolute(output).lexically_normal(), signedBytes, overwrite, nullptr);
+}
+std::vector<SignatureCheck> verifySignatures(const Bytes& pdf) { return signing::verify(pdf); }
 TextInventory Document::textRuns(PageId id) const {
     if (!editable_) return {{}, restriction_};
     auto ids = idsOf(current_.pages);

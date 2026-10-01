@@ -30,6 +30,8 @@ int runCli(int argc, char** argv, const std::filesystem::path& executable) {
                          "  pdfeditor-cli image INPUT.jpg [MORE.jpg ...] OUTPUT.pdf   (one JPEG per page)\n"
                          "  pdfeditor-cli edit INPUT.pdf PAGE RUN \"NEW TEXT\" OUTPUT.pdf [FALLBACK.ttf]   (RUN is one-based; see 'runs')\n"
                          "  pdfeditor-cli runs INPUT.pdf PAGE\n"
+                         "  pdfeditor-cli sign INPUT.pdf OUTPUT.pdf CERT.p12 PASSWORD [REASON]   (macOS)\n"
+                         "  pdfeditor-cli verify SIGNED.pdf\n"
                          "Outputs must not already exist. PAGE is one-based.\n";
             return 0;
         }
@@ -75,6 +77,13 @@ int runCli(int argc, char** argv, const std::filesystem::path& executable) {
             renderer->validate(doc->snapshot());
             if (std::filesystem::exists(utf8Path(argv[4]))) throw std::runtime_error("Output already exists.");
             doc->save(utf8Path(argv[4]));
+        } else if (operation == "sign" && (argc == 6 || argc == 7)) {
+            auto doc = Document::open(utf8Path(argv[2]));
+            SignOptions options; options.certificate = utf8Path(argv[4]); options.password = argv[5]; if (argc == 7) options.reason = argv[6];
+            doc->signTo(utf8Path(argv[3]), options);
+        } else if (operation == "verify" && argc == 3) {
+            for (const auto& check : verifySignatures(readFile(utf8Path(argv[2]))))
+                std::cout << (check.intact ? "intact" : "ALTERED") << (check.coversWholeFile ? "" : " (later changes not covered)") << ' ' << check.signer << '\n';
         } else if (operation == "runs" && argc == 4) {
             auto doc = Document::open(utf8Path(argv[2]));
             std::size_t page = std::stoul(argv[3]);

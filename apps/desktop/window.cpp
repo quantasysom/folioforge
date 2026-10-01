@@ -164,6 +164,7 @@ Window::Window(std::shared_ptr<RenderService> renderer, bool smoke) : renderer_(
     saveAs_ = action(file, "Save &As…", QKeySequence::SaveAs, [this] { save(active(), true); });
     toolbar->addAction(saveAs_);
     save_->setToolTip("Apply any active text edit and save the PDF (Ctrl+S)");
+    signAction_ = action(file, "Sign and save copy…", {}, [this] { signDocument(active()); });
     file->addSeparator(); exportImage_ = action(file, "Export current page as PNG…", {}, [this] { exportImage(); });
     exportText_ = action(file, "Export document text…", {}, [this] { exportText(); });
     action(file, "Close tab", QKeySequence::Close, [this] { closeTab(tabs_->currentIndex()); });
@@ -570,6 +571,23 @@ void Window::placeAnnotation(DocumentPane* p, AddAnnotation request) {
     request.page = p->info.pages[p->currentPage].id; request.expectedRevision = p->info.revision; request.color = annotationRgb();
     run(p, "Adding annotation", [p, request] { p->document->addAnnotation(request); }, [this, p] { render(p); });
 }
+void Window::signDocument(DocumentPane* p) {
+    if (!p || p->busy || !p->document || !p->info.editable) return;
+#ifndef __APPLE__
+    QMessageBox::information(this, "Sign", "Digital signing is currently available on macOS only."); return;
+#endif
+    auto certificate = QFileDialog::getOpenFileName(this, "Choose your signing certificate (PKCS#12)", {}, "Certificates (*.p12 *.pfx)");
+    if (certificate.isEmpty()) return;
+    bool ok = false;
+    auto password = QInputDialog::getText(this, "Certificate password", "Password:", QLineEdit::Password, {}, &ok); if (!ok) return;
+    auto reason = QInputDialog::getText(this, "Signature", "Reason for signing (optional):", QLineEdit::Normal, {}, &ok); if (!ok) return;
+    auto base = QFileInfo(p->property("suggestedName").toString().isEmpty() ? QString::fromStdString(p->info.path.filename().string()) : p->property("suggestedName").toString()).completeBaseName();
+    auto out = QFileDialog::getSaveFileName(this, "Save signed copy", base.isEmpty() ? "signed.pdf" : base + "-signed.pdf", "PDF files (*.pdf)");
+    if (out.isEmpty()) return;
+    SignOptions options; options.certificate = certificate.toStdU16String(); options.password = password.toStdString(); options.reason = reason.toStdString();
+    const std::filesystem::path target = out.toStdU16String();
+    run(p, "Signing", [p, options, target] { p->document->signTo(target, options, true); }, [this, out] { statusBar()->showMessage("Signed copy saved to " + out + ". Opening it read-only.", 8000); openPath(out); });
+}
 void Window::editAnnotation(DocumentPane* p, std::function<void(AddAnnotation&)> change) {
     if (!p || p->busy || !p->document || !p->info.editable) return;
     const int selected = p->canvas->selectedAnnotation;
@@ -723,6 +741,7 @@ void Window::updateActions() {
     later_->setEnabled(editable && p->currentPage + 1 < static_cast<int>(p->info.pages.size()));
     for (auto a : tools_) a->setEnabled(editable);
     annotationColor_->setEnabled(editable);
+    signAction_->setEnabled(editable);
     deleteAnnotation_->setEnabled(editable && p->canvas->selectedAnnotation >= 0);
     if (p) for (auto a : tools_) { QSignalBlocker block(a); a->setChecked(p->canvas->tool != TextCanvas::Tool::None && a->data().toInt() == static_cast<int>(p->canvas->tool) * 100 + static_cast<int>(toolKind_)); }
     for (auto a : {exportImage_, exportText_, find_}) a->setEnabled(ready);

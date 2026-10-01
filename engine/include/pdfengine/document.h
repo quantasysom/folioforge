@@ -70,6 +70,14 @@ struct AddAnnotation {
     double lineWidth{1.5}, fontSize{12};
 };
 
+struct SignOptions {
+    std::filesystem::path certificate;   // PKCS#12 (.p12/.pfx) containing the private key and certificate chain.
+    std::string password, reason, location, signerName;
+};
+struct SignatureCheck { bool intact{}; bool coversWholeFile{}; std::string signer; };
+// Checks every signature in a PDF: intact means the signed bytes are unmodified (trust in the certificate is not evaluated).
+std::vector<SignatureCheck> verifySignatures(const Bytes& pdf);
+
 enum class FormFieldKind { Text, Checkbox, Radio, Choice, Button, Signature };
 // One widget of an AcroForm field on a page. Coordinates are PDF points like Annotation.
 struct FormField {
@@ -144,6 +152,8 @@ public:
     // TrueType (.ttf) fonts tried, in order, before installed system fonts when an edit needs characters the
     // run's own font lacks. Throws Error(Unsupported) if a file cannot be embedded.
     void setFallbackFonts(const std::vector<std::filesystem::path>&);
+    // Writes a signed copy (invisible signature, incremental update) to a new file. The open document is unchanged.
+    void signTo(const std::filesystem::path& output, const SignOptions&, bool overwrite = false);
     // Call renderer validation on snapshot() before saving. Saving revalidates QPDF structure.
     void save(const std::filesystem::path&, bool overwrite = false);
 private:
